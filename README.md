@@ -6,9 +6,11 @@
 
 Draw, animate on a timeline, script with a built-in language, publish to a single-file `.flx` movie or a standalone app, and share it on Flint Hub.
 
+![The Flint editor](docs/editor.png)
+
 ![Flint preview — rendered and exported by Flint itself](docs/preview.gif)
 
-*Rendered and exported by Flint (`flint --showcase docs/preview.gif`).*
+*Above: animation rendered and exported by Flint itself (`flint --showcase docs/preview.gif`).*
 
 </div>
 
