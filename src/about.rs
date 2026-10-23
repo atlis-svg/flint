@@ -7,7 +7,7 @@ pub fn window(ctx: &egui::Context, open: &mut bool, app: &str) {
     egui::Window::new(format!("About {app}")).open(open).default_size([620.0, 520.0]).resizable(true).show(ctx, |ui| {
         ui.heading(format!("{app} {}", env!("CARGO_PKG_VERSION")));
         ui.label("Copyright © 2026 Jasper Gulka. Open source under the MIT or Apache-2.0 license.");
-        ui.hyperlink_to("github.com/znfdjcdttk-png/flint", "https://github.com/znfdjcdttk-png/flint");
+        ui.hyperlink_to("github.com/atlis-svg/flint", "https://github.com/atlis-svg/flint");
         ui.label("Movies, games and projectors you make with Flint are yours to share.");
         ui.separator();
         egui::CollapsingHeader::new("License (MIT; Apache-2.0 also applies, see LICENSE-APACHE)").show(ui, |ui| {
