@@ -2,6 +2,8 @@
 
 # 🔥 Flint
 
+[![CI](https://github.com/znfdjcdttk-png/flint/actions/workflows/ci.yml/badge.svg)](https://github.com/znfdjcdttk-png/flint/actions/workflows/ci.yml) [![Latest release](https://img.shields.io/github/v/release/znfdjcdttk-png/flint)](https://github.com/znfdjcdttk-png/flint/releases/latest) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
 **A free, open-source 2D vector animation & game editor in Rust — in the spirit of Adobe Animate / Flash.**
 
 Draw, animate on a timeline, script with a built-in language, publish to a single-file `.flx` movie or a standalone app, and share it on Flint Hub.
@@ -42,7 +44,14 @@ if hero.hit_test(obj("coin")) { score += 1; }
 - **Projectors**: export a single executable that plays your movie — no install needed
 - **Flint Hub**: publish games & animations, browse, play, like, comment and remix them
 
-## Build
+## Download
+
+Prebuilt **Linux, Windows and macOS (Apple Silicon & Intel)** builds are on the [Releases page](https://github.com/znfdjcdttk-png/flint/releases/latest). Each archive contains the editor (`flint`), Flint Player (`flint-player`) and example movies; nothing to install.
+
+- **Windows:** SmartScreen may warn about an unrecognized app → *More info* → *Run anyway*.
+- **macOS:** builds aren't notarized — run `xattr -dr com.apple.quarantine flint-*` after unzipping, or right-click → *Open* the first time.
+
+## Build from source
 
 Requires a recent stable Rust toolchain (edition 2024).
 

@@ -75,7 +75,10 @@ pub struct Hub {
 }
 
 fn session_path() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .or_else(|| if cfg!(windows) { std::env::var_os("APPDATA") } else { None })
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
     Some(base.join("flint").join("hub.json"))
 }
 

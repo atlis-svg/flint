@@ -1,3 +1,6 @@
+// No console window for the GUI apps on Windows release builds.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use flint::{app, export, flx, hub, model, runtime};
 
 fn main() -> eframe::Result {
@@ -169,7 +172,7 @@ fn scripted_selftest(dir: &std::path::Path) -> Result<(), String> {
     assert!(rt.take_log().iter().any(|l| l.contains("error")));
     // projector packaging round trip
     if let Some(player) = flx::player_exe() {
-        let out = dir.join("demo-projector");
+        let out = dir.join(if cfg!(windows) { "demo-projector.exe" } else { "demo-projector" });
         flx::write_projector(&player, &doc, &out)?;
         let exe = std::fs::read(&out).map_err(|e| e.to_string())?;
         let movie = flx::decode(flx::embedded(&exe).ok_or("no embedded movie")?)?;

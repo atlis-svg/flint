@@ -66,6 +66,13 @@ pub fn embedded(exe: &[u8]) -> Option<&[u8]> {
 }
 
 pub fn write_projector(player_exe: &Path, doc: &Document, out: &Path) -> Result<(), String> {
+    let with_exe;
+    let out = if cfg!(windows) && out.extension().is_none() {
+        with_exe = out.with_extension("exe");
+        with_exe.as_path()
+    } else {
+        out
+    };
     let mut bytes = std::fs::read(player_exe).map_err(|e| format!("player not found at {}: {e}", player_exe.display()))?;
     if let Some(old) = embedded(&bytes) {
         // the player itself is a projector; strip its movie first
@@ -81,6 +88,11 @@ pub fn write_projector(player_exe: &Path, doc: &Document, out: &Path) -> Result<
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o755));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // appending the movie invalidates the linker's ad-hoc signature; Apple Silicon refuses to run it unsigned
+        let _ = std::process::Command::new("codesign").args(["--force", "--sign", "-"]).arg(out).status();
     }
     Ok(())
 }

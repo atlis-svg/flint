@@ -2,6 +2,9 @@
 //! and browses Flint Hub. A projector is this executable with a movie appended; it plays that
 //! movie on launch and hides everything else.
 
+// No console window for the GUI apps on Windows release builds.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use egui::{Color32, FontId, Key, Rect, RichText, Sense, Ui, Vec2};
 use flint::hub::{self, Comment, Hub, LoginForm, MovieInfo, Task};
 use flint::render::{self, View, c32};
@@ -206,7 +209,8 @@ impl Player {
             self.status = "Flint editor not found next to the player".into();
             return;
         };
-        let dir = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Documents").join("Flint");
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+        let dir = home.map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Documents").join("Flint");
         let safe: String = self.name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
         let path = dir.join(format!("{}-remix.flint", if safe.is_empty() { "movie" } else { &safe }));
         let res = std::fs::create_dir_all(&dir)

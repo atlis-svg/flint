@@ -1,0 +1,115 @@
+name: Release
+
+# Push a tag like v0.2.0 to build downloads for every platform and publish a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, test: true }
+          - { name: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc, test: true }
+          - { name: macos-arm64, os: macos-latest, target: aarch64-apple-darwin, test: true }
+          - { name: macos-x86_64, os: macos-latest, target: x86_64-apple-darwin, test: false }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev libwayland-dev
+      - name: Build
+        run: cargo build --release --bins --target ${{ matrix.target }}
+      - name: Headless selftest
+        if: matrix.test
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/flint --selftest "$RUNNER_TEMP/flint-selftest"
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="flint-${TAG}-${{ matrix.name }}"
+          mkdir -p "$dir"
+          ext=""
+          [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
+          cp "target/${{ matrix.target }}/release/flint$ext" "target/${{ matrix.target }}/release/flint-player$ext" "$dir/"
+          cp README.md LICENSE-MIT LICENSE-APACHE THIRD_PARTY_LICENSES.txt "$dir/"
+          cp -r examples "$dir/"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            tar czf "$dir.tar.gz" "$dir"
+            echo "file=$dir.tar.gz" >> "$GITHUB_OUTPUT"
+          elif [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "$dir.zip" "$dir" > /dev/null
+            echo "file=$dir.zip" >> "$GITHUB_OUTPUT"
+          else
+            # unsigned binaries: re-apply ad-hoc signatures so Apple Silicon will run them
+            codesign --force --sign - "$dir/flint" "$dir/flint-player"
+            zip -qry "$dir.zip" "$dir"
+            echo "file=$dir.zip" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ steps.pkg.outputs.file }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          notes=$(cat <<'NOTES'
+          ## Downloads
+
+          | Platform | File |
+          |---|---|
+          | Linux (x86_64) | `flint-*-linux-x86_64.tar.gz` |
+          | Windows (x86_64) | `flint-*-windows-x86_64.zip` |
+          | macOS (Apple Silicon) | `flint-*-macos-arm64.zip` |
+          | macOS (Intel) | `flint-*-macos-x86_64.zip` |
+
+          Each archive has the **Flint** editor (`flint`), **Flint Player** (`flint-player`) and example movies.
+
+          - **Windows:** SmartScreen may warn about an unrecognized app → *More info* → *Run anyway*.
+          - **macOS:** the apps aren't notarized. After unzipping run `xattr -dr com.apple.quarantine flint-*` in Terminal, or right-click → *Open* the first time.
+          - **Linux:** `tar xzf` and run `./flint`. Needs X11 or Wayland and an XDG desktop portal for file dialogs.
+          NOTES
+          )
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "Flint $TAG" --notes "$notes" --generate-notes
+          fi
