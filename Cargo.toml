@@ -3,7 +3,11 @@ name = "flint"
 version = "0.1.0"
 edition = "2024"
 description = "Flint: 2D vector animation and game editor, player and Hub client"
-license-file = "LICENSE"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/znfdjcdttk-png/flint"
+readme = "README.md"
+keywords = ["animation", "vector", "egui", "flash", "gamedev"]
+categories = ["multimedia::images", "game-development", "graphics"]
 publish = false
 
 [dependencies]

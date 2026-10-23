@@ -45,7 +45,7 @@ for i in sorted(seen, key=lambda i: pkgs[i]["name"]):
 out = [
     "Flint — third-party software notices",
     "",
-    "Flint itself is proprietary (see LICENSE). It includes the open-source components below,",
+    "Flint itself is licensed under MIT OR Apache-2.0. It includes the open-source components below,",
     "which remain under their own licenses. Their license texts follow the list.",
     "",
     *rows,

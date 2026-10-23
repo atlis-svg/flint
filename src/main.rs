@@ -6,6 +6,10 @@ fn main() -> eframe::Result {
         let out = args.get(i + 1).cloned().unwrap_or_else(|| ".".into());
         return selftest(std::path::Path::new(&out)).map_err(|e| eframe::Error::AppCreation(e.into()));
     }
+    if let Some(i) = args.iter().position(|a| a == "--showcase") {
+        let out = args.get(i + 1).cloned().unwrap_or_else(|| "showcase.gif".into());
+        return export::export_gif(&showcase(), std::path::Path::new(&out)).map(|n| println!("{n} frames -> {out}")).map_err(|e| eframe::Error::AppCreation(e.into()));
+    }
     if args.iter().any(|a| a == "--hub-test") {
         return hub_test().map_err(|e| eframe::Error::AppCreation(e.into()));
     }
@@ -378,4 +382,55 @@ fn symbol_selftest(dir: &std::path::Path) -> Result<(), String> {
     std::fs::write(dir.join("platformer.flint"), serde_json::to_string(&doc).unwrap()).map_err(|e| e.to_string())?;
     println!("symbols ok");
     Ok(())
+}
+
+/// The README preview: classic tweens with easing and spins, a shape morph, and text, rendered by Flint itself.
+fn showcase() -> model::Document {
+    use model::*;
+    let mut doc = Document::new(640.0, 300.0, 30.0);
+    doc.background = [24, 26, 38, 255];
+    let n = 48;
+    let mut id = || { doc.next_id += 1; doc.next_id };
+    let mk = |id: u64, geom: Geom, x: f32, y: f32, fill: Rgba, stroke: Option<Rgba>| Shape { id, geom, xf: Xform::at(x, y), fill: Some(fill), stroke, stroke_w: 4.0, ..Default::default() };
+    let mut layers = Vec::new();
+    // bouncing ball: down with ease-in, up with ease-out, squash on landing
+    let bid = id();
+    let mut l = Layer::new("Ball", n, LAYER_COLORS[0]);
+    let ball = |y: f32, sx: f32, sy: f32| { let mut b = mk(bid, Geom::Ellipse { rx: 28.0, ry: 28.0 }, 110.0, y, [255, 92, 92, 255], Some([255, 255, 255, 255])); b.xf.sx = sx; b.xf.sy = sy; b };
+    l.keys.get_mut(&0).unwrap().shapes = vec![ball(60.0, 1.0, 1.0)];
+    l.keys.get_mut(&0).unwrap().tween = Tween { kind: TweenKind::Classic, ease: -100.0, spins: 0 };
+    l.keys.insert(22, Keyframe { shapes: vec![ball(232.0, 1.35, 0.7)], tween: Tween { kind: TweenKind::Classic, ease: 100.0, spins: 0 }, ..Default::default() });
+    l.keys.insert(26, Keyframe { shapes: vec![ball(225.0, 0.9, 1.1)], tween: Tween { kind: TweenKind::Classic, ease: 100.0, spins: 0 }, ..Default::default() });
+    l.keys.insert(n - 1, Keyframe { shapes: vec![ball(60.0, 1.0, 1.0)], ..Default::default() });
+    layers.push(l);
+    // morph: rounded square -> star -> square
+    let sq = |id: u64| mk(id, Geom::Rect { w: 110.0, h: 110.0, radius: 18.0 }, 320.0, 150.0, [80, 200, 140, 255], None);
+    let star: Vec<P> = (0..10).map(|i| { let a = i as f32 / 10.0 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2; let r = if i % 2 == 0 { 78.0 } else { 34.0 }; [a.cos() * r, a.sin() * r] }).collect();
+    let mut l = Layer::new("Morph", n, LAYER_COLORS[2]);
+    let (a, b, c) = (id(), id(), id());
+    l.keys.get_mut(&0).unwrap().shapes = vec![sq(a)];
+    l.keys.get_mut(&0).unwrap().tween = Tween { kind: TweenKind::Shape, ease: 50.0, spins: 0 };
+    l.keys.insert(24, Keyframe { shapes: vec![mk(b, Geom::Path { pts: star, closed: true }, 320.0, 150.0, [255, 200, 60, 255], None)], tween: Tween { kind: TweenKind::Shape, ease: 50.0, spins: 0 }, ..Default::default() });
+    l.keys.insert(n - 1, Keyframe { shapes: vec![sq(c)], ..Default::default() });
+    layers.push(l);
+    // spinning, scaling triangle with a full turn
+    let tid = id();
+    let tri = |s: f32, fill: Rgba| { let mut t = mk(tid, Geom::Path { pts: vec![[0.0, -55.0], [48.0, 30.0], [-48.0, 30.0]], closed: true }, 530.0, 150.0, fill, Some([255, 255, 255, 255])); t.xf.sx = s; t.xf.sy = s; t };
+    let mut l = Layer::new("Spin", n, LAYER_COLORS[4]);
+    l.keys.get_mut(&0).unwrap().shapes = vec![tri(0.8, [120, 140, 255, 255])];
+    l.keys.get_mut(&0).unwrap().tween = Tween { kind: TweenKind::Classic, ease: 0.0, spins: 1 };
+    l.keys.insert(n - 1, Keyframe { shapes: vec![tri(0.8, [120, 140, 255, 255])], ..Default::default() });
+    l.keys.insert(24, Keyframe { shapes: vec![tri(1.25, [200, 110, 255, 255])], tween: Tween { kind: TweenKind::Classic, ease: 0.0, spins: 0 }, ..Default::default() });
+    layers.push(l);
+    // title
+    let mut l = Layer::new("Title", n, LAYER_COLORS[1]);
+    let mut t = mk(id(), Geom::Text { text: "Flint".into(), size: 30.0 }, 20.0, 252.0, [235, 235, 245, 255], None);
+    t.stroke = None;
+    let mut sub = mk(id(), Geom::Text { text: "tweens · shape morphs · made & exported by Flint".into(), size: 15.0 }, 100.0, 264.0, [150, 155, 180, 255], None);
+    sub.stroke = None;
+    l.keys.get_mut(&0).unwrap().shapes = vec![t, sub];
+    layers.push(l);
+    layers.reverse();
+    doc.layers = layers;
+    doc
 }

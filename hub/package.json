@@ -1,7 +1,7 @@
 {
   "name": "flint-hub",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT OR Apache-2.0",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",

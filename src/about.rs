@@ -1,15 +1,16 @@
 //! About window with the license and third-party notices, shared by the editor and player.
 
-pub const LICENSE: &str = include_str!("../LICENSE");
+pub const LICENSE: &str = include_str!("../LICENSE-MIT");
 pub const THIRD_PARTY: &str = include_str!("../THIRD_PARTY_LICENSES.txt");
 
 pub fn window(ctx: &egui::Context, open: &mut bool, app: &str) {
     egui::Window::new(format!("About {app}")).open(open).default_size([620.0, 520.0]).resizable(true).show(ctx, |ui| {
         ui.heading(format!("{app} {}", env!("CARGO_PKG_VERSION")));
-        ui.label("Copyright © 2026 Jasper Gulka. All rights reserved. Proprietary software.");
+        ui.label("Copyright © 2026 Jasper Gulka. Open source under the MIT or Apache-2.0 license.");
+        ui.hyperlink_to("github.com/znfdjcdttk-png/flint", "https://github.com/znfdjcdttk-png/flint");
         ui.label("Movies, games and projectors you make with Flint are yours to share.");
         ui.separator();
-        egui::CollapsingHeader::new("License").show(ui, |ui| {
+        egui::CollapsingHeader::new("License (MIT; Apache-2.0 also applies, see LICENSE-APACHE)").show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("lic").max_height(200.0).show(ui, |ui| {
                 ui.monospace(LICENSE);
             });
