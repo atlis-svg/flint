@@ -80,6 +80,7 @@ pub struct FlintApp {
     rect_radius: f32,
     font_size: f32,
     eraser_size: f32,
+    bucket_gap: f32,
     sel: Vec<(usize, u64)>,
     zoom: f32,
     pan: Vec2,
@@ -151,6 +152,7 @@ impl FlintApp {
             rect_radius: 0.0,
             font_size: 36.0,
             eraser_size: 16.0,
+            bucket_gap: 3.0,
             sel: Vec::new(),
             zoom: 1.0,
             pan: Vec2::ZERO,
@@ -1425,6 +1427,15 @@ impl FlintApp {
             if matches!(self.tool, Tool::Pencil | Tool::Brush) {
                 ui.add(egui::Slider::new(&mut self.smoothing, 0.0..=100.0).text("Smoothing"));
             }
+            if self.tool == Tool::Bucket {
+                ui.horizontal(|ui| {
+                    ui.label("Gap");
+                    for (v, l) in [(0.0, "None"), (3.0, "Small"), (7.0, "Medium"), (14.0, "Large")] {
+                        ui.selectable_value(&mut self.bucket_gap, v, l);
+                    }
+                });
+                ui.label(egui::RichText::new("Fills the area enclosed by lines; a bigger gap closes small openings between them.").small().weak());
+            }
             if self.tool == Tool::Rect {
                 ui.add(egui::Slider::new(&mut self.rect_radius, 0.0..=200.0).text("Corner radius"));
             }
@@ -2030,34 +2041,21 @@ impl FlintApp {
                 let sp = self.snap(sp);
                 self.drag = Drag::Box(sp, sp);
             }
-            Tool::Bucket | Tool::Ink => {
-                let target = if self.tool == Tool::Bucket {
-                    self.doc.layers.iter().enumerate().filter(|(_, l)| l.visible && !l.locked).find_map(|(li, _)| self.doc.layer_shapes(li, self.frame).into_iter().rev().find(|s| s.encloses(sp) || s.hit(sp, 2.0 / self.zoom)).map(|s| (li, s)))
-                } else {
-                    self.hit_test(sp, None)
-                };
+            Tool::Bucket => self.bucket_click(sp),
+            Tool::Ink => {
+                let target = self.hit_test(sp, None);
                 if let Some((li, s)) = target {
                     self.checkpoint();
-                    let (fc, sc, sw) = (rgba(self.fill_col), rgba(self.stroke_col), self.stroke_w);
-                    let bucket = self.tool == Tool::Bucket;
+                    let (sc, sw) = (rgba(self.stroke_col), self.stroke_w);
                     // inside groups, only paint the leaf under the cursor
-                    let leaves = s.flatten();
                     let tol = 2.0 / self.zoom;
-                    let target_leaf = leaves.iter().rposition(|l| if bucket { l.encloses(sp) || l.hit(sp, tol) } else { l.hit(sp, tol) }).unwrap_or(0);
+                    let target_leaf = s.flatten().iter().rposition(|l| l.hit(sp, tol)).unwrap_or(0);
                     if let Some(m) = self.doc.shape_mut(li, self.frame, s.id) {
                         let mut i = 0;
                         m.for_leaves_mut(&mut |m| {
-                            if i == target_leaf {
-                                if bucket {
-                                    if m.local_outline().1 {
-                                        m.fill = Some(fc);
-                                    } else {
-                                        m.stroke = Some(fc);
-                                    }
-                                } else if !m.is_text() {
-                                    m.stroke = Some(sc);
-                                    m.stroke_w = sw;
-                                }
+                            if i == target_leaf && !m.is_text() {
+                                m.stroke = Some(sc);
+                                m.stroke_w = sw;
                             }
                             i += 1;
                         });
@@ -3182,5 +3180,99 @@ impl FlintApp {
             }
         });
         ui.label(egui::RichText::new("Tip: give instances names in Properties, put frame labels (idle, run, jump) inside the symbol, then script hero.goto_and_play(\"run\").").small().weak());
+    }
+}
+
+impl FlintApp {
+    /// Paint Bucket: recolor a filled shape, fill a lone closed outline, or fill the region enclosed by lines.
+    fn bucket_click(&mut self, sp: P) {
+        let frame = self.frame;
+        let tol = 2.0 / self.zoom;
+        let fc = rgba(self.fill_col);
+        let editable: Vec<usize> = (0..self.doc.layers.len()).filter(|&li| self.layer_editable(li)).collect();
+
+        // 1. a filled shape (or text) under the cursor: recolor it
+        let filled = editable.iter().find_map(|&li| {
+            self.doc.layer_shapes(li, frame).into_iter().rev().find_map(|top| {
+                let leaves = top.flatten();
+                leaves.iter().rposition(|l| (l.fill.is_some() && l.encloses(sp)) || (l.is_text() && l.hit(sp, tol))).map(|leaf| (li, top, leaf))
+            })
+        });
+        if let Some((li, top, leaf)) = filled {
+            self.paint_leaf(li, &top, leaf, |m| m.fill = Some(fc));
+            return;
+        }
+        if !self.layer_editable(self.layer) {
+            self.status = "Active layer is locked or hidden".into();
+            return;
+        }
+        let active: Vec<Shape> = self.doc.layer_shapes(self.layer, frame);
+        let leaves: Vec<Shape> = active.iter().flat_map(|s| s.flatten()).collect();
+
+        // 2. a single closed outline with nothing inside it: give the shape itself a fill
+        for top in active.iter().rev() {
+            let tl = top.flatten();
+            let Some(leaf) = tl.iter().rposition(|l| l.encloses(sp)) else { continue };
+            let outline = &tl[leaf];
+            let others_inside = leaves.iter().any(|o| {
+                if o.id == outline.id {
+                    return false;
+                }
+                let b = o.bounds();
+                outline.encloses([(b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5])
+            });
+            if !others_inside {
+                self.paint_leaf(self.layer, top, leaf, |m| m.fill = Some(fc));
+                return;
+            }
+            break;
+        }
+
+        // 3. the region enclosed by lines: this layer's first, then everything visible
+        let mut result = crate::fill::region_fill(&leaves, sp, self.zoom, self.bucket_gap);
+        if matches!(result, Err(crate::fill::FillError::NotEnclosed)) {
+            let all: Vec<Shape> = self.doc.render_list(frame).into_iter().flat_map(|(_, s)| s.flatten()).collect();
+            if all.len() > leaves.len() {
+                result = crate::fill::region_fill(&all, sp, self.zoom, self.bucket_gap);
+            }
+        }
+        match result {
+            Ok(poly) => {
+                self.checkpoint();
+                let b = bounds_of(&poly);
+                let c = [(b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5];
+                let pts = poly.iter().map(|p| [p[0] - c[0], p[1] - c[1]]).collect();
+                let id = self.doc.alloc_id();
+                let shape = Shape { id, geom: Geom::Path { pts, closed: true }, xf: Xform::at(c[0], c[1]), fill: Some(fc), stroke: None, ..Default::default() };
+                // fills sit under the lines that bound them
+                self.doc.edit_key(self.layer, frame).shapes.insert(0, shape);
+                self.status = "Filled".into();
+            }
+            Err(crate::fill::FillError::NotEnclosed) => {
+                self.status = "That area isn't enclosed — close the gap or pick a bigger Gap in the Paint Bucket options".into();
+            }
+            Err(crate::fill::FillError::OnShape) => {
+                self.status = "Click inside an area enclosed by lines".into();
+            }
+        }
+    }
+
+    /// Applies `f` to leaf number `leaf` (in `flatten()` order) of the top-level shape `top`.
+    fn paint_leaf(&mut self, li: usize, top: &Shape, leaf: usize, mut f: impl FnMut(&mut Shape)) {
+        if top.symbol_id().is_some() {
+            self.status = "That's a symbol instance — double-click it to paint inside".into();
+            return;
+        }
+        self.checkpoint();
+        let frame = self.frame;
+        if let Some(m) = self.doc.shape_mut(li, frame, top.id) {
+            let mut i = 0;
+            m.for_leaves_mut(&mut |m| {
+                if i == leaf {
+                    f(m);
+                }
+                i += 1;
+            });
+        }
     }
 }

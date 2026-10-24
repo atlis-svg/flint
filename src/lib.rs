@@ -6,3 +6,4 @@ pub mod render;
 pub mod runtime;
 pub mod hub;
 pub mod about;
+pub mod fill;

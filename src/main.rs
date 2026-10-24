@@ -75,6 +75,7 @@ fn selftest(dir: &std::path::Path) -> Result<(), String> {
     group_selftest()?;
     timer_selftest()?;
     symbol_selftest(dir)?;
+    fill_selftest()?;
     scripted_selftest(dir)?;
     println!("selftest ok: {} frames, outputs in {}", doc.frame_count(), dir.display());
     Ok(())
@@ -436,4 +437,48 @@ fn showcase() -> model::Document {
     layers.reverse();
     doc.layers = layers;
     doc
+}
+
+fn fill_selftest() -> Result<(), String> {
+    use flint::fill::{FillError, region_fill};
+    use model::*;
+    let line = |a: P, b: P| Shape { geom: Geom::Path { pts: vec![a, b], closed: false }, stroke: Some([0, 0, 0, 255]), stroke_w: 2.0, ..Default::default() };
+    let area = |p: &[P]| (0..p.len()).map(|i| p[i][0] * p[(i + 1) % p.len()][1] - p[(i + 1) % p.len()][0] * p[i][1]).sum::<f32>().abs() * 0.5;
+    // a box drawn with four separate lines (the case the old bucket couldn't fill)
+    let bx = vec![line([0.0, 0.0], [100.0, 0.0]), line([100.0, 0.0], [100.0, 100.0]), line([100.0, 100.0], [0.0, 100.0]), line([0.0, 100.0], [0.0, 0.0])];
+    let poly = region_fill(&bx, [50.0, 50.0], 1.0, 0.0).map_err(|e| format!("box: {e:?}"))?;
+    assert!(point_in_poly([50.0, 50.0], &poly) && point_in_poly([5.0, 95.0], &poly) && !point_in_poly([120.0, 50.0], &poly));
+    let a = area(&poly);
+    assert!((9000.0..10500.0).contains(&a), "box fill area {a}");
+    assert_eq!(region_fill(&bx, [100.0, 50.0], 1.0, 0.0), Err(FillError::OnShape));
+    assert_eq!(region_fill(&bx, [150.0, 50.0], 1.0, 0.0), Err(FillError::NotEnclosed));
+    // a 6px opening: leaks with no gap closing, fills with Small/Medium
+    let mut open = bx.clone();
+    open[0] = line([0.0, 0.0], [94.0, 0.0]);
+    assert_eq!(region_fill(&open, [50.0, 50.0], 1.0, 0.0), Err(FillError::NotEnclosed));
+    assert!(region_fill(&open, [50.0, 50.0], 1.0, 3.0).is_ok());
+    // donut: box with a circle outline inside; filling between them leaves the circle as a hole
+    let mut donut = bx.clone();
+    donut.push(Shape { geom: Geom::Ellipse { rx: 20.0, ry: 20.0 }, xf: Xform::at(50.0, 50.0), stroke: Some([0, 0, 0, 255]), stroke_w: 2.0, ..Default::default() });
+    let ring = region_fill(&donut, [10.0, 10.0], 2.0, 0.0).map_err(|e| format!("donut: {e:?}"))?;
+    assert!(point_in_poly([10.0, 10.0], &ring) && point_in_poly([90.0, 50.0], &ring) && !point_in_poly([50.0, 50.0], &ring), "hole missing");
+    // box interior minus the circle (strokes take ~1px on each side), so about 99² − π·21²
+    let a = area(&ring);
+    assert!((8000.0..9100.0).contains(&a), "donut area {a}");
+    // the editor's triangulator must cover the slit polygon exactly
+    let sp: Vec<egui::Pos2> = ring.iter().map(|p| egui::pos2(p[0], p[1])).collect();
+    let tri_area: f32 = flint::render::triangulate(&sp).iter().map(|t| {
+        let (a, b, c) = (sp[t[0] as usize], sp[t[1] as usize], sp[t[2] as usize]);
+        ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs() * 0.5
+    }).sum();
+    assert!((tri_area - a).abs() / a < 0.02, "triangulated {tri_area} vs polygon {a}");
+    // and the exported raster shows the hole
+    let mut doc = Document::new(100.0, 100.0, 10.0);
+    let fill = Shape { geom: Geom::Path { pts: ring.clone(), closed: true }, fill: Some([0, 200, 0, 255]), ..Default::default() };
+    doc.layers[0].keys.get_mut(&0).unwrap().shapes = vec![fill];
+    let pm = export::render_frame(&doc, 0, 1.0);
+    let g = |x, y| pm.pixel(x, y).unwrap().green();
+    assert!(g(10, 10) == 200 && g(50, 50) == 255 && pm.pixel(50, 50).unwrap().red() == 255, "raster hole");
+    println!("fill ok");
+    Ok(())
 }

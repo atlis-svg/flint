@@ -11,7 +11,7 @@ fn paint(c: Rgba) -> Paint<'static> {
     p
 }
 
-fn poly_path(pts: &[P], closed: bool) -> Option<tiny_skia::Path> {
+pub fn poly_path(pts: &[P], closed: bool) -> Option<tiny_skia::Path> {
     let mut pb = PathBuilder::new();
     pb.move_to(pts.first()?[0], pts[0][1]);
     if pts.len() == 1 {
