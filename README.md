@@ -2,6 +2,8 @@
 
 # 🔥 Flint
 
+### *One app, lots*
+
 [![CI](https://github.com/atlis-svg/flint/actions/workflows/ci.yml/badge.svg)](https://github.com/atlis-svg/flint/actions/workflows/ci.yml) [![Latest release](https://img.shields.io/github/v/release/atlis-svg/flint)](https://github.com/atlis-svg/flint/releases/latest) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 **A free, open-source 2D vector animation & game editor in Rust — in the spirit of Adobe Animate / Flash.**

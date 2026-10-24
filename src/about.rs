@@ -6,6 +6,7 @@ pub const THIRD_PARTY: &str = include_str!("../THIRD_PARTY_LICENSES.txt");
 pub fn window(ctx: &egui::Context, open: &mut bool, app: &str) {
     egui::Window::new(format!("About {app}")).open(open).default_size([620.0, 520.0]).resizable(true).show(ctx, |ui| {
         ui.heading(format!("{app} {}", env!("CARGO_PKG_VERSION")));
+        ui.label(egui::RichText::new("One app, lots").italics().color(egui::Color32::from_rgb(255, 140, 70)));
         ui.label("Copyright © 2026 Jasper Gulka. Open source under the MIT or Apache-2.0 license.");
         ui.hyperlink_to("github.com/atlis-svg/flint", "https://github.com/atlis-svg/flint");
         ui.label("Movies, games and projectors you make with Flint are yours to share.");

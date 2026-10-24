@@ -2545,7 +2545,11 @@ impl eframe::App for FlintApp {
             self.play_accum = 0.0;
         }
 
-        let title = format!("{}{} - Flint", self.base_name(), if self.dirty { "*" } else { "" });
+        let title = if self.path.is_none() && !self.dirty {
+            "Flint — One app, lots".to_string()
+        } else {
+            format!("{}{} - Flint", self.base_name(), if self.dirty { "*" } else { "" })
+        };
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
