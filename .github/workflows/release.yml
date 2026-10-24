@@ -103,6 +103,8 @@ jobs:
 
           Each archive has the **Flint** editor (`flint`), **Flint Player** (`flint-player`) and example movies.
 
+          > **AI disclosure:** most of Flint's code was written by Claude (Anthropic) via Claude Code, directed and reviewed by Jasper Gulka. See the README for details.
+
           - **Windows:** SmartScreen may warn about an unrecognized app → *More info* → *Run anyway*.
           - **macOS:** the apps aren't notarized. After unzipping run `xattr -dr com.apple.quarantine flint-*` in Terminal, or right-click → *Open* the first time.
           - **Linux:** `tar xzf` and run `./flint`. Needs X11 or Wayland and an XDG desktop portal for file dialogs.

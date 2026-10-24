@@ -98,6 +98,14 @@ On Linux you need the usual windowing libraries (X11/Wayland, `libxkbcommon`) an
 
 Issues and pull requests are welcome! Good places to start: motion guides, sound, bitmap import, layer masks, edit-in-place for symbols.
 
+## AI disclosure
+
+Flint was built with substantial help from AI. Most of the code, including the editor, player, scripting runtime, Flint Hub server and the build and release workflows, was written by **Claude** (Anthropic) through [Claude Code](https://claude.com/claude-code). **Jasper Gulka** directed the work: choosing the features, reviewing the results and deciding what to publish.
+
+- Commits with AI-written changes carry a `Co-Authored-By: Claude` trailer.
+- Changes were checked mainly by the automated headless test suite (`--selftest`, which CI runs on Linux, Windows and macOS) and the Hub end-to-end test. Not every interactive UI path has been tested by hand, so please report anything that doesn't work.
+- The README preview GIF was rendered by Flint itself (`--showcase`), not by an image generator. The editor screenshot is a real screenshot.
+
 ## License
 
 Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

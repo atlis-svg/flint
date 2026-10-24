@@ -9,6 +9,7 @@ pub fn window(ctx: &egui::Context, open: &mut bool, app: &str) {
         ui.label("Copyright © 2026 Jasper Gulka. Open source under the MIT or Apache-2.0 license.");
         ui.hyperlink_to("github.com/atlis-svg/flint", "https://github.com/atlis-svg/flint");
         ui.label("Movies, games and projectors you make with Flint are yours to share.");
+        ui.label(egui::RichText::new("AI disclosure: most of Flint's code was written by Claude (Anthropic) via Claude Code, directed and reviewed by Jasper Gulka.").small().weak());
         ui.separator();
         egui::CollapsingHeader::new("License (MIT; Apache-2.0 also applies, see LICENSE-APACHE)").show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("lic").max_height(200.0).show(ui, |ui| {
