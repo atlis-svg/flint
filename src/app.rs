@@ -104,6 +104,7 @@ pub struct FlintApp {
     script_active: bool,
     hub: hub::Hub,
     publish: Option<PublishDialog>,
+    intro: Option<crate::intro::Intro>,
     right_tab: u8,
     show_about: bool,
     lib_sel: Option<u64>,
@@ -123,6 +124,7 @@ impl FlintApp {
         cc.egui_ctx.set_visuals(vis);
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let mut app = Self::blank(Document::new(1280.0, 720.0, 24.0));
+        app.intro = crate::intro::Intro::new();
         if let Some(p) = std::env::args().nth(1).filter(|a| !a.starts_with("--")) {
             app.open_path(PathBuf::from(p));
         }
@@ -176,6 +178,7 @@ impl FlintApp {
             script_active: false,
             hub: hub::Hub::load(),
             publish: None,
+            intro: None,
             right_tab: 0,
             show_about: false,
             lib_sel: None,
@@ -2507,6 +2510,14 @@ fn color_opt(ui: &mut Ui, label: &str, c: &mut Option<Rgba>) -> bool {
 
 impl eframe::App for FlintApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        if let Some(intro) = &mut self.intro {
+            let mut done = false;
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| done = intro.show(ui));
+            if !done {
+                return;
+            }
+            self.intro = None;
+        }
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
 

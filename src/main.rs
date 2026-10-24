@@ -13,6 +13,13 @@ fn main() -> eframe::Result {
         let out = args.get(i + 1).cloned().unwrap_or_else(|| "showcase.gif".into());
         return export::export_gif(&showcase(), std::path::Path::new(&out)).map(|n| println!("{n} frames -> {out}")).map_err(|e| eframe::Error::AppCreation(e.into()));
     }
+    if let Some(i) = args.iter().position(|a| a == "--export") {
+        let (Some(input), Some(out)) = (args.get(i + 1), args.get(i + 2)) else {
+            return Err(eframe::Error::AppCreation("usage: flint --export <in.flint|in.flx> <out.png|gif|svg|flx> [frame]".into()));
+        };
+        let frame = args.get(i + 3).and_then(|f| f.parse::<usize>().ok()).unwrap_or(1).max(1) - 1;
+        return export_cli(std::path::Path::new(input), std::path::Path::new(out), frame).map_err(|e| eframe::Error::AppCreation(e.into()));
+    }
     if args.iter().any(|a| a == "--hub-test") {
         return hub_test().map_err(|e| eframe::Error::AppCreation(e.into()));
     }
@@ -76,6 +83,7 @@ fn selftest(dir: &std::path::Path) -> Result<(), String> {
     timer_selftest()?;
     symbol_selftest(dir)?;
     fill_selftest()?;
+    intro_selftest()?;
     scripted_selftest(dir)?;
     println!("selftest ok: {} frames, outputs in {}", doc.frame_count(), dir.display());
     Ok(())
@@ -480,5 +488,40 @@ fn fill_selftest() -> Result<(), String> {
     let g = |x, y| pm.pixel(x, y).unwrap().green();
     assert!(g(10, 10) == 200 && g(50, 50) == 255 && pm.pixel(50, 50).unwrap().red() == 255, "raster hole");
     println!("fill ok");
+    Ok(())
+}
+
+/// `flint --export in out [frame]`: converts a document or movie by output extension (frames count from 1).
+fn export_cli(input: &std::path::Path, out: &std::path::Path, frame: usize) -> Result<(), String> {
+    let doc = flx::load(input)?;
+    match out.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+        "png" => export::export_png(&doc, frame.min(doc.frame_count() - 1), out)?,
+        "svg" => export::export_svg(&doc, frame.min(doc.frame_count() - 1), out)?,
+        "gif" => {
+            export::export_gif(&doc, out)?;
+        }
+        "flx" => {
+            flx::save(&doc, out)?;
+        }
+        other => return Err(format!("unknown output type .{other} (use png, gif, svg or flx)")),
+    }
+    println!("{}", out.display());
+    Ok(())
+}
+
+fn intro_selftest() -> Result<(), String> {
+    let doc = flx::decode(flint::intro::INTRO_FLX)?;
+    let frames = doc.frame_count();
+    let fps = doc.fps as f64;
+    let mut rt = runtime::Runtime::new(doc);
+    rt.set_looping(false);
+    for _ in 0..((frames as f64 / fps + 1.0) * 60.0) as usize {
+        rt.tick(1.0 / 60.0);
+    }
+    assert_eq!(rt.frame(), frames - 1, "intro should end on its last frame");
+    assert!(!rt.playing(), "intro should stop, not loop");
+    let log = rt.take_log();
+    assert!(!log.iter().any(|l| l.contains("error")), "{log:?}");
+    println!("intro ok ({frames} frames, {:.1}s)", frames as f64 / fps);
     Ok(())
 }

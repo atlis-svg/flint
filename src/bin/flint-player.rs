@@ -61,6 +61,7 @@ struct Player {
     login: Option<LoginForm>,
     status: String,
     show_about: bool,
+    intro: Option<flint::intro::Intro>,
 }
 
 impl Player {
@@ -227,6 +228,14 @@ impl Player {
 
 impl eframe::App for Player {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        if let Some(intro) = &mut self.intro {
+            let mut done = false;
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| done = intro.show(ui));
+            if !done {
+                return;
+            }
+            self.intro = None;
+        }
         let ctx = ui.ctx().clone();
         self.poll_tasks(&ctx);
         let title = if self.name.is_empty() {
@@ -723,6 +732,7 @@ fn main() -> eframe::Result {
         login: None,
         status: String::new(),
         show_about: false,
+        intro: None,
     };
     let mut size = [1100.0f32, 760.0];
     if let Some(m) = std::env::current_exe().ok().and_then(|p| flx::embedded_in_file(&p)) {
@@ -736,6 +746,10 @@ fn main() -> eframe::Result {
         }
     } else if let Some(arg) = std::env::args().nth(1) {
         player.open_path(PathBuf::from(arg));
+    }
+    // the intro plays when the player opens to the Hub, not for a movie or a projector
+    if player.rt.is_none() && !player.projector {
+        player.intro = flint::intro::Intro::new();
     }
     if let Some(rt) = &player.rt {
         let d = rt.doc();
