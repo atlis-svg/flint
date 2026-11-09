@@ -3,7 +3,7 @@
 
 use crate::export;
 use crate::model::*;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, Pixmap, Stroke, Transform};
 
 /// Most pixels the fill mask may use; larger areas are rasterized more coarsely.
@@ -120,7 +120,10 @@ pub fn region_fill(barriers: &[Shape], click: P, px_per_unit: f32, gap_px: f32) 
 /// Directed edges around every inside pixel (inside on the right in y-down coords), linked into loops.
 fn trace_loops(inside: &[bool], w: usize, h: usize) -> Vec<Vec<[f32; 2]>> {
     let at = |x: isize, y: isize| x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h && inside[y as usize * w + x as usize];
-    let mut next: HashMap<(i32, i32), Vec<(i32, i32)>> = HashMap::new();
+    // BTreeMap (not HashMap): loop tracing order must be deterministic across
+    // runs/platforms — HashMap's random seed made the traced loops, and thus
+    // the bridged slit polygon, change from run to run (flaky triangulate).
+    let mut next: BTreeMap<(i32, i32), Vec<(i32, i32)>> = BTreeMap::new();
     for y in 0..h as isize {
         for x in 0..w as isize {
             if !at(x, y) {
@@ -177,6 +180,47 @@ fn simplify_loop(l: &[[f32; 2]], eps: f32) -> Vec<[f32; 2]> {
     s
 }
 
+fn orient(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+fn on_segment(a: [f32; 2], b: [f32; 2], p: [f32; 2]) -> bool {
+    p[0] >= a[0].min(b[0]) - 1e-6 && p[0] <= a[0].max(b[0]) + 1e-6 && p[1] >= a[1].min(b[1]) - 1e-6 && p[1] <= a[1].max(b[1]) + 1e-6
+}
+
+fn segments_intersect(p1: [f32; 2], p2: [f32; 2], q1: [f32; 2], q2: [f32; 2]) -> bool {
+    let d1 = orient(q1, q2, p1);
+    let d2 = orient(q1, q2, p2);
+    let d3 = orient(p1, p2, q1);
+    let d4 = orient(p1, p2, q2);
+    if ((d1 > 0.0) != (d2 > 0.0)) && ((d3 > 0.0) != (d4 > 0.0)) && d1.abs() > 1e-9 && d2.abs() > 1e-9 && d3.abs() > 1e-9 && d4.abs() > 1e-9 {
+        return true;
+    }
+    // touching / collinear overlap counts as crossing (except shared endpoints, handled by caller)
+    (d1.abs() <= 1e-9 && on_segment(q1, q2, p1)) || (d2.abs() <= 1e-9 && on_segment(q1, q2, p2)) || (d3.abs() <= 1e-9 && on_segment(p1, p2, q1)) || (d4.abs() <= 1e-9 && on_segment(p1, p2, q2))
+}
+
+/// Does segment `a-b` cross any edge of `outer` or `hole`, ignoring edges incident to the endpoints?
+fn segment_crosses(a: [f32; 2], b: [f32; 2], outer: &[[f32; 2]], outer_idx: Option<usize>, hole: &[[f32; 2]], hole_idx: Option<usize>) -> bool {
+    let crosses_poly = |poly: &[[f32; 2]], idx: Option<usize>| {
+        let n = poly.len();
+        for i in 0..n {
+            let j = (i + 1) % n;
+            // skip edges incident to the bridge endpoint on this polygon
+            if let Some(k) = idx {
+                if i == k || j == k {
+                    continue;
+                }
+            }
+            if segments_intersect(a, b, poly[i], poly[j]) {
+                return true;
+            }
+        }
+        false
+    };
+    crosses_poly(outer, outer_idx) || crosses_poly(hole, hole_idx)
+}
+
 /// Joins each hole to the outline with a zero-width slit so the region is one polygon
 /// (filled correctly by even-odd rasterizers and the ear-clipping triangulator).
 fn bridge_holes(mut outer: Vec<[f32; 2]>, mut holes: Vec<Vec<[f32; 2]>>) -> Vec<[f32; 2]> {
@@ -186,14 +230,27 @@ fn bridge_holes(mut outer: Vec<[f32; 2]>, mut holes: Vec<Vec<[f32; 2]>>) -> Vec<
         mx(b).total_cmp(&mx(a))
     });
     for hole in holes {
-        let hi = (0..hole.len()).max_by(|&a, &b| hole[a][0].total_cmp(&hole[b][0])).unwrap();
+        let hi = (0..hole.len()).max_by(|&a, &b| hole[a][0].total_cmp(&hole[b][0]).then(a.cmp(&b))).unwrap();
         let hp = hole[hi];
-        let oi = (0..outer.len())
-            .min_by(|&a, &b| {
-                let d = |p: [f32; 2]| (p[0] - hp[0]).powi(2) + (p[1] - hp[1]).powi(2);
-                d(outer[a]).total_cmp(&d(outer[b]))
-            })
-            .unwrap();
+        // Closest outer vertex whose bridge segment does not cross the outline
+        // or the hole (a crossing slit makes a self-intersecting polygon that
+        // ear clipping then fans incorrectly). Falls back to the closest vertex.
+        let dist = |p: [f32; 2]| (p[0] - hp[0]).powi(2) + (p[1] - hp[1]).powi(2);
+        let mut candidates: Vec<usize> = (0..outer.len()).collect();
+        candidates.sort_by(|&a, &b| dist(outer[a]).total_cmp(&dist(outer[b])).then(a.cmp(&b)));
+        let mut oi = candidates[0];
+        for &cand in &candidates {
+            let op = outer[cand];
+            if segment_crosses(op, hp, &outer, Some(cand), &hole, Some(hi)) {
+                continue;
+            }
+            let mid = [(op[0] + hp[0]) * 0.5, (op[1] + hp[1]) * 0.5];
+            if !crate::model::point_in_poly(mid, &outer) || crate::model::point_in_poly(mid, &hole) {
+                continue;
+            }
+            oi = cand;
+            break;
+        }
         // The way back runs a hair beside the way in, so the polygon stays simple (no repeated
         // points), which ear clipping needs: each duplicate slides a little along its next edge.
         let nudge = |p: [f32; 2], toward: [f32; 2]| {

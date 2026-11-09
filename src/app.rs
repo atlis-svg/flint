@@ -58,10 +58,20 @@ enum Drag {
     Scrub,
 }
 
+/// Animate-style New / Convert Symbol dialog state.
+struct SymbolDialog {
+    name: String,
+    kind: SymbolKind,
+    mode: SymMode,
+    first: usize,
+    convert: bool,
+}
+
 pub struct FlintApp {
     doc: Document,
     path: Option<PathBuf>,
     dirty: bool,
+    symbol_dialog: Option<SymbolDialog>,
     undo: Vec<Document>,
     redo: Vec<Document>,
     frame: usize,
@@ -137,6 +147,7 @@ impl FlintApp {
             doc,
             path: None,
             dirty: false,
+            symbol_dialog: None,
             undo: Vec::new(),
             redo: Vec::new(),
             frame: 0,
@@ -509,15 +520,32 @@ impl FlintApp {
     }
 
     fn add_layer(&mut self) {
+        self.add_layer_with_kind(LayerKind::Normal);
+    }
+
+    fn add_guide_layer(&mut self) {
+        self.add_layer_with_kind(LayerKind::Guide);
+    }
+
+    fn add_layer_with_kind(&mut self, kind: LayerKind) {
         self.checkpoint();
         let n = self.doc.layers.len();
+        let prefix = if kind == LayerKind::Guide { "Guide" } else { "Layer" };
         let mut i = n + 1;
-        while self.doc.layers.iter().any(|l| l.name == format!("Layer_{i}")) {
+        while self.doc.layers.iter().any(|l| l.name == format!("{prefix}_{i}")) {
             i += 1;
         }
-        let l = Layer::new(&format!("Layer_{i}"), self.doc.frame_count(), LAYER_COLORS[n % LAYER_COLORS.len()]);
+        let l = Layer::with_kind(&format!("{prefix}_{i}"), self.doc.frame_count(), LAYER_COLORS[n % LAYER_COLORS.len()], kind);
         self.doc.layers.insert(self.layer, l);
         self.sel.clear();
+        self.status = if kind == LayerKind::Guide { "Added guide layer (editor-only, hidden in player/export)".into() } else { "Added layer".into() };
+    }
+
+    fn toggle_layer_kind(&mut self, li: usize) {
+        self.checkpoint();
+        let l = &mut self.doc.layers[li];
+        l.kind = if l.kind == LayerKind::Guide { LayerKind::Normal } else { LayerKind::Guide };
+        self.status = format!("Layer \"{}\" is now a {} layer", l.name, l.kind.label());
     }
 
     fn delete_layer(&mut self) {
@@ -964,6 +992,10 @@ impl FlintApp {
                     self.add_layer();
                     ui.close();
                 }
+                if ui.button("New Guide Layer").clicked() {
+                    self.add_guide_layer();
+                    ui.close();
+                }
                 ui.separator();
                 if ui.button("Frame            F5").clicked() {
                     self.tl_insert_frame();
@@ -1190,6 +1222,34 @@ impl FlintApp {
                     }
                     ui.end_row();
                 });
+                ui.separator();
+                ui.strong("Layer");
+                {
+                    let li = self.layer;
+                    let l = &self.doc.layers[li];
+                    ui.label(format!("\"{}\" ({})", l.name, l.kind.label()));
+                    let mut kind = l.kind;
+                    egui::ComboBox::from_id_salt("layerkind").selected_text(kind.label()).show_ui(ui, |ui| {
+                        changed |= ui.selectable_value(&mut kind, LayerKind::Normal, "Normal").changed();
+                        changed |= ui.selectable_value(&mut kind, LayerKind::Guide, "Guide (editor-only)").changed();
+                    });
+                    if kind != self.doc.layers[li].kind {
+                        self.doc.layers[li].kind = kind;
+                        changed = true;
+                    }
+                    if kind == LayerKind::Guide {
+                        ui.label(egui::RichText::new("Guide layers are shown translucent in the editor and hidden in the player and exports.").small().weak());
+                    }
+                    let mut vis = self.doc.layers[li].visible;
+                    let mut lock = self.doc.layers[li].locked;
+                    let mut outl = self.doc.layers[li].outline;
+                    changed |= ui.checkbox(&mut vis, "Visible").changed();
+                    changed |= ui.checkbox(&mut lock, "Locked").changed();
+                    changed |= ui.checkbox(&mut outl, "Outline").changed();
+                    self.doc.layers[li].visible = vis;
+                    self.doc.layers[li].locked = lock;
+                    self.doc.layers[li].outline = outl;
+                }
             } else {
                 ui.strong(if sel.len() == 1 { shape_kind(&sel[0].1).to_string() } else { format!("{} objects", sel.len()) });
                 let (li, s0) = sel[0].clone();
@@ -1306,10 +1366,19 @@ impl FlintApp {
                             }
                         }
                         Geom::Symbol { symbol, first, mode, .. } => {
-                            let sym = self.doc.symbol(*symbol).map(|x| (x.name.clone(), x.frame_count()));
+                            let sym = self.doc.symbol(*symbol).map(|x| (x.name.clone(), x.frame_count(), x.kind));
                             egui::CollapsingHeader::new("Symbol instance").default_open(true).show(ui, |ui| {
-                                let (name, len) = sym.unwrap_or(("(missing symbol)".into(), 1));
-                                ui.label(format!("Instance of \"{name}\" ({len} frames)"));
+                                let (name, len, kind) = sym.unwrap_or(("(missing symbol)".into(), 1, SymbolKind::MovieClip));
+                                ui.label(format!("Instance of \"{name}\" · {} · {len} frames", kind.label()));
+                                match kind {
+                                    SymbolKind::MovieClip => ui.label(egui::RichText::new("Movie Clip: independent timeline in the player.").small().weak()),
+                                    SymbolKind::Graphic => ui.label(egui::RichText::new("Graphic: synced to the parent timeline; Loop / Play Once / Single Frame applies to the parent playhead.").small().weak()),
+                                    SymbolKind::Button => ui.label(egui::RichText::new("Button: Up / Over / Down states from the mouse; Hit frame (4) is never drawn.").small().weak()),
+                                };
+                                if kind == SymbolKind::Button {
+                                    // Buttons don't use Loop/Once/Single — hide those controls.
+                                    if ui.button("✏ Edit Symbol (double-click)").clicked() { edit_symbol = Some(*symbol); }
+                                } else {
                                 ui.horizontal(|ui| {
                                     ui.label("Plays");
                                     egui::ComboBox::from_id_salt("symmode").selected_text(match mode { SymMode::Loop => "Loop", SymMode::Once => "Play once", SymMode::Single => "Single frame" }).show_ui(ui, |ui| {
@@ -1329,7 +1398,8 @@ impl FlintApp {
                                 if ui.button("✏ Edit Symbol (double-click)").clicked() {
                                     edit_symbol = Some(*symbol);
                                 }
-                                ui.label(egui::RichText::new("In the player each instance runs its own timeline; scripts can use .play(), .stop(), .goto_and_play(\"label\").").small().weak());
+                                ui.label(egui::RichText::new(if kind == SymbolKind::Graphic { "Graphic instances are synced to the parent timeline in the player." } else { "In the player each instance runs its own timeline; scripts can use .play(), .stop(), .goto_and_play(\"label\")." }).small().weak());
+                                } // else (MovieClip / Graphic)
                             });
                         }
                     }
@@ -1557,9 +1627,16 @@ impl FlintApp {
                     ui.horizontal(|ui| {
                         ui.set_height(ruler_h);
                         ui.spacing_mut().item_spacing.x = 2.0;
-                        if ui.small_button("➕").on_hover_text("New layer").clicked() {
-                            self.add_layer();
-                        }
+                        ui.menu_button("➕", |ui| {
+                            if ui.button("New Layer").clicked() {
+                                self.add_layer();
+                                ui.close();
+                            }
+                            if ui.button("New Guide Layer").clicked() {
+                                self.add_guide_layer();
+                                ui.close();
+                            }
+                        });
                         if ui.small_button("🗑").on_hover_text("Delete layer").clicked() {
                             self.delete_layer();
                         }
@@ -1656,8 +1733,8 @@ impl FlintApp {
         let p = ui.painter().clone();
         p.rect_filled(rect, 0.0, if active { Color32::from_rgb(38, 90, 160) } else { Color32::from_gray(48) });
         p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, Color32::from_gray(30)));
-        let l = { let l = &self.doc.layers[li]; LayerInfo { name: l.name.clone(), visible: l.visible, locked: l.locked, outline: l.outline, color: l.color } };
-        p.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, "📄", FontId::proportional(12.0), Color32::from_gray(200));
+        let l = { let l = &self.doc.layers[li]; LayerInfo { name: l.name.clone(), visible: l.visible, locked: l.locked, outline: l.outline, color: l.color, kind: l.kind } };
+        p.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, if l.kind == LayerKind::Guide { "🧭" } else { "📄" }, FontId::proportional(12.0), Color32::from_gray(200));
         let name_rect = Rect::from_min_max(rect.min + Vec2::new(26.0, 0.0), Pos2::new(rect.right() - 72.0, rect.bottom()));
         if self.renaming == Some(li) {
             let mut name = l.name.clone();
@@ -1710,6 +1787,16 @@ impl FlintApp {
         if resp.double_clicked() {
             self.renaming = Some(li);
         }
+        let kind = l.kind;
+        resp.context_menu(|ui| {
+            if ui.button(if kind == LayerKind::Guide { "Convert to Normal Layer" } else { "Convert to Guide Layer" }).clicked() {
+                self.toggle_layer_kind(li);
+                ui.close();
+            }
+            if ui.button("Guide layers are editor-only (hidden in player & export)").clicked() {
+                ui.close();
+            }
+        });
     }
 
     fn draw_grid(&self, p: &egui::Painter, rect: Rect, shown: usize, cw: f32, rh: f32, ruler_h: f32) {
@@ -1737,10 +1824,14 @@ impl FlintApp {
                 let c = Rect::from_min_size(Pos2::new(rect.left() + f as f32 * cw, y), Vec2::new(cw, rh));
                 let in_span = f < l.len;
                 let bg = if in_span {
-                    match l.tween_at(f).filter(|(k, end, _)| l.next_key(*k).is_some_and(|n| n < l.len && n == *end)) {
-                        Some((_, _, tw)) if tw.kind == TweenKind::Classic => Color32::from_rgb(105, 80, 165),
-                        Some(_) => Color32::from_rgb(70, 135, 75),
-                        None => Color32::from_gray(205),
+                    if l.is_guide() {
+                        Color32::from_rgb(120, 170, 165)
+                    } else {
+                        match l.tween_at(f).filter(|(k, end, _)| l.next_key(*k).is_some_and(|n| n < l.len && n == *end)) {
+                            Some((_, _, tw)) if tw.kind == TweenKind::Classic => Color32::from_rgb(105, 80, 165),
+                            Some(_) => Color32::from_rgb(70, 135, 75),
+                            None => Color32::from_gray(205),
+                        }
                     }
                 } else if (f + 1) % 5 == 0 {
                     Color32::from_gray(44)
@@ -1887,7 +1978,9 @@ impl FlintApp {
             }
             let l = &self.doc.layers[li];
             let outline = l.outline.then(|| c32(l.color));
-            render::draw_shape(&shape_painter, &v, &s, &render::Style { alpha: 1.0, outline });
+            // Guide layers are translucent reference art in the editor.
+            let alpha = if l.is_guide() { 0.55 } else { 1.0 };
+            render::draw_shape(&shape_painter, &v, &s, &render::Style { alpha, outline });
         }
 
         if in_symbol {
@@ -2485,6 +2578,7 @@ struct LayerInfo {
     locked: bool,
     outline: bool,
     color: Rgba,
+    kind: LayerKind,
 }
 
 enum TH {
@@ -2591,7 +2685,7 @@ impl eframe::App for FlintApp {
             if self.frame != prev_frame {
                 if let Some(audio) = &self.audio {
                     let fr = self.frame;
-                    let ids: Vec<u64> = self.doc.layers.iter().filter_map(|l| if fr < l.len { l.keys.get(&fr).and_then(|k| k.sound) } else { None }).collect();
+                    let ids: Vec<u64> = self.doc.layers.iter().filter(|l| !l.is_guide()).filter_map(|l| if fr < l.len { l.keys.get(&fr).and_then(|k| k.sound) } else { None }).collect();
                     for id in ids {
                         audio.play_id(&self.doc, id);
                     }
@@ -2638,6 +2732,7 @@ impl eframe::App for FlintApp {
         });
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.stage(ui));
         self.new_doc_dialog(&ctx);
+        self.symbol_dialog_window(&ctx);
         self.actions_window(&ctx);
         self.publish_window(&ctx);
         crate::about::window(&ctx, &mut self.show_about, "Flint");
@@ -3106,8 +3201,22 @@ impl FlintApp {
         }
     }
 
-    /// F8: turns the selection (on one layer) into a new symbol and leaves an instance in its place.
+    /// F8: opens the Convert to Symbol dialog (Animate-style).
     fn convert_to_symbol(&mut self) {
+        if self.sel.is_empty() {
+            self.status = "Select something to convert to a symbol".into();
+            return;
+        }
+        self.symbol_dialog = Some(SymbolDialog {
+            name: self.unique_symbol_name("Symbol"),
+            kind: SymbolKind::MovieClip,
+            mode: SymMode::Loop,
+            first: 0,
+            convert: true,
+        });
+    }
+
+    fn create_converted_symbol(&mut self, name: String, kind: SymbolKind, mode: SymMode, first: usize) {
         let Some(&(li, _)) = self.sel.first() else {
             self.status = "Select something to convert to a symbol".into();
             return;
@@ -3119,7 +3228,6 @@ impl FlintApp {
         let frame = self.frame;
         let sid = self.doc.alloc_id();
         let iid = self.doc.alloc_id();
-        let name = self.unique_symbol_name("Symbol");
         let key = self.doc.edit_key(li, frame);
         let mut picked = Vec::new();
         let mut insert_at = 0;
@@ -3138,14 +3246,19 @@ impl FlintApp {
             s.xf.x -= c[0];
             s.xf.y -= c[1];
         }
-        let inst = Shape { id: iid, geom: Geom::Symbol { symbol: sid, first: 0, mode: SymMode::Loop, children: Vec::new() }, xf: Xform::at(c[0], c[1]), ..Default::default() };
+        let inst_mode = if kind == SymbolKind::Button { SymMode::Loop } else { mode };
+        let inst_first = if kind == SymbolKind::Button { 0 } else { first };
+        let inst = Shape { id: iid, geom: Geom::Symbol { symbol: sid, first: inst_first, mode: inst_mode, children: Vec::new() }, xf: Xform::at(c[0], c[1]), ..Default::default() };
         key.shapes.insert(insert_at.min(key.shapes.len()), inst);
-        let mut layer = Layer::new("Layer_1", 1, LAYER_COLORS[0]);
-        layer.keys.get_mut(&0).unwrap().shapes = picked;
-        self.doc.symbols.push(Symbol { id: sid, name: name.clone(), layers: vec![layer] });
+        // Starter timeline by kind; converted art goes into the Up (or frame 0) keyframe.
+        let mut sym = Symbol::new(sid, name.clone(), kind, LAYER_COLORS[0]);
+        if let Some(layer) = sym.layers.first_mut() {
+            layer.keys.get_mut(&0).unwrap().shapes = picked;
+        }
+        self.doc.symbols.push(sym);
         self.sel = vec![(li, iid)];
         self.lib_sel = Some(sid);
-        self.status = format!("Converted to symbol \"{name}\" — double-click it to animate inside");
+        self.status = format!("Converted to {} symbol \"{name}\" — double-click it to animate inside", kind.label());
     }
 
     fn import_sound(&mut self) {
@@ -3163,13 +3276,104 @@ impl FlintApp {
         }
     }
 
-    /// Ctrl+F8: makes an empty symbol and opens it for editing.
+    /// Ctrl+F8: opens the New Symbol dialog (Animate-style).
     fn new_symbol(&mut self) {
+        self.symbol_dialog = Some(SymbolDialog {
+            name: self.unique_symbol_name("Symbol"),
+            kind: SymbolKind::MovieClip,
+            mode: SymMode::Loop,
+            first: 0,
+            convert: false,
+        });
+    }
+
+    fn create_new_symbol(&mut self, name: String, kind: SymbolKind) {
         self.checkpoint();
         let sid = self.doc.alloc_id();
-        let name = self.unique_symbol_name("Symbol");
-        self.doc.symbols.push(Symbol { id: sid, name, layers: vec![Layer::new("Layer_1", 1, LAYER_COLORS[0])] });
+        self.doc.symbols.push(Symbol::new(sid, name.clone(), kind, LAYER_COLORS[0]));
+        self.lib_sel = Some(sid);
+        self.status = format!("Created {} symbol \"{name}\"", kind.label());
         self.enter_symbol(sid);
+    }
+
+    /// The Animate-style New / Convert Symbol dialog: name + type (+ Graphic looping).
+    fn symbol_dialog_window(&mut self, ctx: &egui::Context) {
+        let Some(mut dlg) = self.symbol_dialog.take() else { return };
+        let mut open = true;
+        let mut cancel = false;
+        let mut ok = false;
+        let mut err = String::new();
+        let title = if dlg.convert { "Convert to Symbol" } else { "New Symbol" };
+        egui::Window::new(title).collapsible(false).resizable(false).open(&mut open).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Name:");
+                ui.add(egui::TextEdit::singleline(&mut dlg.name).desired_width(220.0));
+            });
+            ui.separator();
+            ui.label("Type:");
+            ui.radio_value(&mut dlg.kind, SymbolKind::MovieClip, "Movie Clip — independent timeline, scriptable");
+            ui.radio_value(&mut dlg.kind, SymbolKind::Graphic, "Graphic — synced to parent timeline");
+            ui.radio_value(&mut dlg.kind, SymbolKind::Button, "Button — Up / Over / Down / Hit frames");
+            if dlg.kind == SymbolKind::Button {
+                ui.label(egui::RichText::new("Buttons have 4 fixed frames: Up (0), Over (1), Down (2), Hit (3). The Hit frame defines the click area and is never drawn.").small().weak());
+            } else {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Playback:");
+                    egui::ComboBox::from_id_salt("dlgmode").selected_text(match dlg.mode { SymMode::Loop => "Loop", SymMode::Once => "Play Once", SymMode::Single => "Single Frame" }).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut dlg.mode, SymMode::Loop, "Loop");
+                        ui.selectable_value(&mut dlg.mode, SymMode::Once, "Play Once");
+                        ui.selectable_value(&mut dlg.mode, SymMode::Single, "Single Frame");
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.label("First frame:");
+                    let mut f1 = dlg.first + 1;
+                    if ui.add(egui::DragValue::new(&mut f1).range(1..=100)).changed() {
+                        dlg.first = f1.saturating_sub(1);
+                    }
+                    if dlg.kind == SymbolKind::Graphic {
+                        ui.label(egui::RichText::new("(synced to parent playhead)").small().weak());
+                    }
+                });
+            }
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() {
+                    ok = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+            if ok {
+                let name = dlg.name.trim().to_string();
+                if name.is_empty() {
+                    err = "Give the symbol a name.".into();
+                    ok = false;
+                } else if self.doc.symbols.iter().any(|s| s.name == name) {
+                    err = format!("A symbol named \"{name}\" already exists.");
+                    ok = false;
+                } else {
+                    dlg.name = name;
+                }
+            }
+            if !err.is_empty() {
+                ui.colored_label(Color32::from_rgb(255, 110, 110), err);
+            }
+        });
+        if cancel { open = false; }
+        if ok && open {
+            if dlg.convert {
+                self.create_converted_symbol(dlg.name.clone(), dlg.kind, dlg.mode, dlg.first);
+            } else {
+                self.create_new_symbol(dlg.name.clone(), dlg.kind);
+            }
+            self.symbol_dialog = None;
+        } else if open {
+            self.symbol_dialog = Some(dlg);
+        } else {
+            self.symbol_dialog = None;
+        }
     }
 
     fn place_symbol(&mut self, id: u64) {
@@ -3222,10 +3426,10 @@ impl FlintApp {
             return;
         }
         let editing: Vec<u64> = self.doc.edit_stack.iter().map(|c| c.symbol).collect();
-        let list: Vec<(u64, String, usize)> = self.doc.symbols.iter().map(|s| (s.id, s.name.clone(), if editing.contains(&s.id) { 0 } else { s.frame_count() })).collect();
+        let list: Vec<(u64, String, usize, SymbolKind)> = self.doc.symbols.iter().map(|s| (s.id, s.name.clone(), if editing.contains(&s.id) { 0 } else { s.frame_count() }, s.kind)).collect();
         egui::ScrollArea::vertical().max_height(220.0).id_salt("liblist").show(ui, |ui| {
-            for (id, name, frames) in &list {
-                let label = if editing.contains(id) { format!("◆ {name}   (editing)") } else { format!("◆ {name}   {frames}f") };
+            for (id, name, frames, kind) in &list {
+                let label = if editing.contains(id) { format!("◆ {name} · {} (editing)", kind.label()) } else { format!("◆ {name} · {} · {frames}f", kind.label()) };
                 let r = ui.selectable_label(self.lib_sel == Some(*id), label);
                 if r.clicked() {
                     self.lib_sel = Some(*id);
@@ -3235,7 +3439,7 @@ impl FlintApp {
                 }
             }
         });
-        let Some(id) = self.lib_sel.filter(|id| list.iter().any(|(i, _, _)| i == id)) else { return };
+        let Some(id) = self.lib_sel.filter(|id| list.iter().any(|(i, _, _, _)| i == id)) else { return };
         ui.separator();
         // preview (frame 1)
         let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().min(260.0), 150.0), Sense::hover());
@@ -3267,6 +3471,35 @@ impl FlintApp {
                 self.dirty = true;
             }
         });
+        {
+            let mut kind = self.doc.symbol(id).map(|s| s.kind).unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.label("Type");
+                let mut k = kind;
+                egui::ComboBox::from_id_salt("libkind").selected_text(k.label()).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut k, SymbolKind::MovieClip, "Movie Clip");
+                    ui.selectable_value(&mut k, SymbolKind::Graphic, "Graphic");
+                    ui.selectable_value(&mut k, SymbolKind::Button, "Button");
+                });
+                if k != kind {
+                    self.checkpoint();
+                    if let Some(s) = self.doc.symbol_mut(id) {
+                        s.kind = k;
+                        // Switching to Button ensures the 4-frame skeleton exists.
+                        if k == SymbolKind::Button && s.frame_count() < BUTTON_STATES.len() {
+                            if let Some(l) = s.layers.first_mut() {
+                                l.len = l.len.max(BUTTON_STATES.len());
+                                for i in 0..BUTTON_STATES.len() {
+                                    l.keys.entry(i).or_insert_with(|| Keyframe { label: BUTTON_STATES[i].to_string(), ..Default::default() });
+                                }
+                            }
+                        }
+                    }
+                    kind = k;
+                    self.status = format!("Symbol type changed to {}", kind.label());
+                }
+            });
+        }
         let labels: Vec<String> = self.doc.symbol(id).map(|s| s.layers.iter().flat_map(|l| l.keys.values().filter(|k| !k.label.is_empty()).map(|k| k.label.clone())).collect()).unwrap_or_default();
         if !labels.is_empty() {
             ui.label(egui::RichText::new(format!("Labels: {}", labels.join(", "))).small());

@@ -40,6 +40,25 @@ pub struct Document {
     pub edit_stack: Vec<EditCtx>,
 }
 
+/// What a layer is for. `Guide` layers are editor-only reference art (like an
+/// Animate guide layer): visible on the stage in the editor, but never in the
+/// player, exports or `.flx` output. Old files default to `Normal`.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
+pub enum LayerKind {
+    #[default]
+    Normal,
+    Guide,
+}
+
+impl LayerKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            LayerKind::Normal => "Normal",
+            LayerKind::Guide => "Guide",
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Layer {
     pub name: String,
@@ -49,6 +68,8 @@ pub struct Layer {
     pub color: Rgba,
     pub len: usize,
     pub keys: BTreeMap<usize, Keyframe>,
+    #[serde(default)]
+    pub kind: LayerKind,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -151,12 +172,86 @@ pub enum SymMode {
     Single,
 }
 
+/// The Animate symbol types. Old symbols default to `MovieClip`.
+/// - `MovieClip`: independent timeline, `Loop/Once/Single`, scriptable.
+/// - `Graphic`: timeline synced to the parent playhead (see `SymMode` for
+///   Loop / Play Once / Single Frame behaviour).
+/// - `Button`: fixed 4-frame timeline `Up / Over / Down / Hit`; the Hit
+///   frame defines the click area and is never drawn.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
+pub enum SymbolKind {
+    #[default]
+    MovieClip,
+    Graphic,
+    Button,
+}
+
+impl SymbolKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SymbolKind::MovieClip => "Movie Clip",
+            SymbolKind::Graphic => "Graphic",
+            SymbolKind::Button => "Button",
+        }
+    }
+}
+
+/// Fixed Button state frames.
+pub const BUTTON_STATES: [&str; 4] = ["Up", "Over", "Down", "Hit"];
+
 /// A reusable object with its own timeline (like an Animate movie clip).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub id: u64,
     pub name: String,
     pub layers: Vec<Layer>,
+    #[serde(default)]
+    pub kind: SymbolKind,
+}
+
+impl Symbol {
+    /// A fresh symbol of `kind` with a sensible starter timeline.
+    pub fn new(id: u64, name: String, kind: SymbolKind, color: Rgba) -> Self {
+        let layers = match kind {
+            SymbolKind::Button => {
+                let mut l = Layer::new("Layer_1", BUTTON_STATES.len(), color);
+                for (i, state) in BUTTON_STATES.iter().enumerate() {
+                    // keyframe 0 already exists from Layer::new
+                    let kf = l.keys.entry(i).or_default();
+                    if kf.label.is_empty() {
+                        kf.label = state.to_string();
+                    }
+                }
+                // ensure all four keyframes exist (Layer::new only made frame 0)
+                for i in 1..BUTTON_STATES.len() {
+                    l.keys.entry(i).or_insert_with(|| Keyframe { label: BUTTON_STATES[i].to_string(), ..Default::default() });
+                }
+                vec![l]
+            }
+            SymbolKind::MovieClip | SymbolKind::Graphic => vec![Layer::new("Layer_1", 1, color)],
+        };
+        Symbol { id, name, layers, kind }
+    }
+
+    pub fn is_button(&self) -> bool {
+        self.kind == SymbolKind::Button
+    }
+
+    /// Hit-test shapes for a Button instance frame: the Hit frame (3) when it
+    /// has art, otherwise the Up frame (0). Used by the runtime so Hit art is
+    /// never drawn but still defines the click area.
+    pub fn button_hit_shapes(&self) -> Vec<Shape> {
+        if !self.is_button() {
+            return Vec::new();
+        }
+        // Hit frame shapes, falling back to Up.
+        let hit: Vec<Shape> = self.layers.iter().rev().flat_map(|l| l.shapes_at(3)).collect();
+        if hit.is_empty() {
+            self.layers.iter().rev().flat_map(|l| l.shapes_at(0)).collect()
+        } else {
+            hit
+        }
+    }
 }
 
 /// A library sound: audio file bytes as base64 (wav/mp3/ogg).
@@ -528,9 +623,19 @@ pub fn text_extent(text: &str, size: f32) -> (f32, f32) {
 
 impl Layer {
     pub fn new(name: &str, len: usize, color: Rgba) -> Self {
+        Self::with_kind(name, len, color, LayerKind::Normal)
+    }
+
+    pub fn with_kind(name: &str, len: usize, color: Rgba, kind: LayerKind) -> Self {
         let mut keys = BTreeMap::new();
         keys.insert(0, Keyframe::default());
-        Layer { name: name.into(), visible: true, locked: false, outline: false, color, len: len.max(1), keys }
+        // Guide layers are locked by default in Animate; keep them editable
+        // but the `kind` flag alone drives output exclusion.
+        Layer { name: name.into(), visible: true, locked: false, outline: false, color, len: len.max(1), keys, kind }
+    }
+
+    pub fn is_guide(&self) -> bool {
+        self.kind == LayerKind::Guide
     }
 
     /// Keyframe index governing `f` (ignores span end).
@@ -771,6 +876,7 @@ impl Document {
     }
 
     /// Visible shapes at frame f, back to front, with symbol instances expanded.
+    /// This is the *editor* view: guide layers are included.
     pub fn render_list(&self, f: usize) -> Vec<(usize, Shape)> {
         self.render_list_with(f, &|_, frame| frame)
     }
@@ -778,12 +884,26 @@ impl Document {
     /// Like [`render_list`]; `timing(instance, default_frame)` picks each top-level instance's frame
     /// (the player uses it to run movie clips independently).
     pub fn render_list_with(&self, f: usize, timing: &dyn Fn(&Shape, usize) -> usize) -> Vec<(usize, Shape)> {
+        self.render_list_inner(f, timing, true)
+    }
+
+    /// Like [`render_list`], but guide layers are excluded — what the player
+    /// and exports should show.
+    pub fn output_list(&self, f: usize) -> Vec<(usize, Shape)> {
+        self.output_list_with(f, &|_, frame| frame)
+    }
+
+    pub fn output_list_with(&self, f: usize, timing: &dyn Fn(&Shape, usize) -> usize) -> Vec<(usize, Shape)> {
+        self.render_list_inner(f, timing, false)
+    }
+
+    fn render_list_inner(&self, f: usize, timing: &dyn Fn(&Shape, usize) -> usize, include_guides: bool) -> Vec<(usize, Shape)> {
         let mut out = Vec::new();
         for (li, l) in self.layers.iter().enumerate().rev() {
-            if !l.visible {
+            if !l.visible || (!include_guides && l.is_guide()) {
                 continue;
             }
-            for s in self.eval_layer(l, f, 0, timing) {
+            for s in self.eval_layer(l, f, 0, timing, include_guides) {
                 out.push((li, s));
             }
         }
@@ -792,32 +912,45 @@ impl Document {
 
     /// One layer's shapes at `f` with instances expanded (for hit testing and bounds).
     pub fn layer_shapes(&self, li: usize, f: usize) -> Vec<Shape> {
-        self.layers.get(li).map(|l| self.eval_layer(l, f, 0, &|_, frame| frame)).unwrap_or_default()
+        self.layers.get(li).map(|l| self.eval_layer(l, f, 0, &|_, frame| frame, true)).unwrap_or_default()
     }
 
-    fn eval_layer(&self, l: &Layer, f: usize, depth: usize, timing: &dyn Fn(&Shape, usize) -> usize) -> Vec<Shape> {
+    fn eval_layer(&self, l: &Layer, f: usize, depth: usize, timing: &dyn Fn(&Shape, usize) -> usize, include_guides: bool) -> Vec<Shape> {
         let local = f.saturating_sub(l.key_at(f));
         let mut shapes = l.shapes_at(f);
+        // A Button's Hit frame is never drawn.
         for s in &mut shapes {
-            self.expand(s, local, depth, timing);
+            self.expand(s, f, local, depth, timing, include_guides);
         }
         shapes
     }
 
-    fn expand(&self, s: &mut Shape, local: usize, depth: usize, timing: &dyn Fn(&Shape, usize) -> usize) {
+    fn expand(&self, s: &mut Shape, f: usize, local: usize, depth: usize, timing: &dyn Fn(&Shape, usize) -> usize, include_guides: bool) {
         match &mut s.geom {
             Geom::Group { children } => {
                 for c in children {
-                    self.expand(c, local, depth, timing);
+                    self.expand(c, f, local, depth, timing, include_guides);
                 }
             }
             Geom::Symbol { symbol, first, mode, .. } => {
                 let (symbol, first, mode) = (*symbol, *first, *mode);
                 let Some(sym) = self.symbol(symbol).filter(|_| depth < 8) else { return };
-                let frame = if depth == 0 { timing(s, instance_frame(mode, first, local, sym.frame_count())) } else { instance_frame(mode, first, local, sym.frame_count()) };
+                // Default frame by symbol kind:
+                // - Graphic: synced to the parent playhead `f`
+                // - Button: Up (0); the runtime timing override picks Over/Down
+                // - MovieClip: synced to the keyframe span (`local`)
+                let default_frame = match sym.kind {
+                    SymbolKind::Graphic => instance_frame(mode, first, f, sym.frame_count()),
+                    SymbolKind::Button => 0,
+                    SymbolKind::MovieClip => instance_frame(mode, first, local, sym.frame_count()),
+                };
+                let frame = if depth == 0 { timing(s, default_frame) } else { default_frame };
                 let mut out = Vec::new();
-                for l in sym.layers.iter().rev().filter(|l| l.visible) {
-                    out.extend(self.eval_layer(l, frame, depth + 1, &|_, f| f));
+                // Hit frame (3) is hit-area only, never rendered.
+                if !(sym.is_button() && frame >= 3) {
+                    for l in sym.layers.iter().rev().filter(|l| l.visible && (include_guides || !l.is_guide())) {
+                        out.extend(self.eval_layer(l, frame, depth + 1, &|_, f| f, include_guides));
+                    }
                 }
                 if let Geom::Symbol { children, .. } = &mut s.geom {
                     *children = out;
@@ -830,9 +963,12 @@ impl Document {
     /// A symbol's content at one of its frames (for library previews).
     pub fn symbol_shapes(&self, id: u64, frame: usize) -> Vec<Shape> {
         let Some(sym) = self.symbol(id) else { return Vec::new() };
+        if sym.is_button() && frame >= 3 {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for l in sym.layers.iter().rev().filter(|l| l.visible) {
-            out.extend(self.eval_layer(l, frame, 1, &|_, f| f));
+            out.extend(self.eval_layer(l, frame, 1, &|_, f| f, true));
         }
         out
     }

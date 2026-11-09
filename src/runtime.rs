@@ -30,6 +30,7 @@ struct State {
     base: Vec<(usize, Shape)>,
     ovr: HashMap<String, Ovr>,
     mouse: P,
+    mouse_down: bool,
     keys: HashSet<String>,
     log: Vec<String>,
     time: f64,
@@ -505,6 +506,7 @@ impl Runtime {
             base: Vec::new(),
             ovr: HashMap::new(),
             mouse: [0.0, 0.0],
+            mouse_down: false,
             keys: HashSet::new(),
             log: Vec::new(),
             time: 0.0,
@@ -579,25 +581,52 @@ impl Runtime {
 
     fn refresh(&mut self) {
         let mut guard = self.st.borrow_mut();
-        let State { doc, clips, base, frame, .. } = &mut *guard;
-        *base = doc.render_list_with(*frame, &|s, def| clips.get(&s.id).map_or(def, |c| c.frame));
-        // instances that just appeared start their own playhead; ones that left are forgotten
-        let mut fresh = false;
+        let State { doc, clips, base, frame, mouse, mouse_down, .. } = &mut *guard;
+        // Provisional list (default frames) to discover instances and button hit areas.
+        // output_list excludes guide layers, like exports.
+        let provisional = doc.output_list(*frame);
+        // Movie-clip instances get an independent playhead; Graphic/Button do not.
         let mut present = HashSet::new();
-        for (_, s) in base.iter() {
+        for (_, s) in provisional.iter() {
             if let Geom::Symbol { symbol, first, mode, .. } = s.geom {
                 present.insert(s.id);
-                clips.entry(s.id).or_insert_with(|| {
-                    fresh = true;
-                    let len = doc.symbol(symbol).map_or(1, |x| x.frame_count());
-                    Clip { symbol, mode, frame: first.min(len - 1), playing: mode != SymMode::Single, ran: None, hold: true }
-                });
+                let is_mc = doc.symbol(symbol).is_some_and(|sym| sym.kind == SymbolKind::MovieClip);
+                if is_mc {
+                    clips.entry(s.id).or_insert_with(|| {
+                        let len = doc.symbol(symbol).map_or(1, |x| x.frame_count());
+                        Clip { symbol, mode, frame: first.min(len - 1), playing: mode != SymMode::Single, ran: None, hold: true }
+                    });
+                }
             }
         }
         clips.retain(|id, _| present.contains(id));
-        if fresh {
-            *base = doc.render_list_with(*frame, &|s, def| clips.get(&s.id).map_or(def, |c| c.frame));
+        // Button states: Up=0, Over=1, Down=2 based on mouse position/down over the Hit area.
+        let mut button_frames: HashMap<u64, usize> = HashMap::new();
+        for (_, s) in provisional.iter() {
+            let Some(sym_id) = s.symbol_id() else { continue };
+            let Some(sym) = doc.symbol(sym_id) else { continue };
+            if sym.kind != SymbolKind::Button {
+                continue;
+            }
+            let hit_shapes = sym.button_hit_shapes();
+            let dummy = Shape {
+                id: s.id,
+                geom: Geom::Symbol { symbol: sym_id, first: 0, mode: SymMode::Loop, children: hit_shapes },
+                xf: s.xf,
+                ..Default::default()
+            };
+            let inside = dummy.encloses(*mouse) || dummy.hit(*mouse, 2.0);
+            let state = if inside && *mouse_down { 2 } else if inside { 1 } else { 0 };
+            button_frames.insert(s.id, state);
         }
+        // Graphic instances use the parent-synced default frame (`def`); buttons use their state.
+        *base = doc.output_list_with(*frame, &|s, def| {
+            if let Some(f) = button_frames.get(&s.id) {
+                *f
+            } else {
+                clips.get(&s.id).map_or(def, |c| c.frame)
+            }
+        });
     }
 
     /// Steps every playing movie clip one frame and runs symbol frame scripts (with `me` = the instance).
@@ -623,7 +652,7 @@ impl Runtime {
                 if c.ran != Some(c.frame) {
                     c.ran = Some(c.frame);
                     let Some(inst) = base.iter().find(|(_, s)| s.id == *id) else { continue };
-                    for l in sym.layers.iter().rev() {
+                    for l in sym.layers.iter().rev().filter(|l| !l.is_guide()) {
                         if let Some(k) = l.keys.get(&c.frame).filter(|k| !k.script.trim().is_empty() && c.frame < l.len) {
                             out.push((obj_key(&inst.1), format!("{} frame {}", sym.name, c.frame + 1), k.script.clone()));
                         }
@@ -698,13 +727,14 @@ impl Runtime {
                 let mut st = self.st.borrow_mut();
                 st.frame = f.min(st.total() - 1);
                 let fr = st.frame;
-                // Sound cues on this frame (collect first to avoid borrow conflict)
-                let cues: Vec<u64> = st.doc.layers.iter().filter_map(|l| if fr < l.len { l.keys.get(&fr).and_then(|k| k.sound) } else { None }).collect();
+                // Sound cues on this frame (guide layers are editor-only, so no cues/scripts)
+                let cues: Vec<u64> = st.doc.layers.iter().filter(|l| !l.is_guide()).filter_map(|l| if fr < l.len { l.keys.get(&fr).and_then(|k| k.sound) } else { None }).collect();
                 st.pending_sounds.extend(cues);
                 st.doc
                     .layers
                     .iter()
                     .rev()
+                    .filter(|l| !l.is_guide())
                     .filter(|l| fr < l.len)
                     .filter_map(|l| l.keys.get(&fr).filter(|k| !k.script.trim().is_empty()).map(|k| (format!("{} frame {}", l.name, fr + 1), k.script.clone())))
                     .collect()
@@ -813,8 +843,38 @@ impl Runtime {
         st.keys = keys;
     }
 
+    /// Whether the primary mouse button is held (drives Button Down state).
+    pub fn set_mouse_down(&mut self, down: bool) {
+        self.st.borrow_mut().mouse_down = down;
+    }
+
+    /// Hit test for a Button instance against its Hit frame (falling back to Up).
+    fn button_hit(&self, s: &Shape, p: P) -> bool {
+        let Some(sym_id) = s.symbol_id() else { return false };
+        let st = self.st.borrow();
+        let Some(sym) = st.doc.symbol(sym_id) else { return false };
+        if sym.kind != SymbolKind::Button {
+            return false;
+        }
+        let hit_shapes = sym.button_hit_shapes();
+        let dummy = Shape {
+            id: s.id,
+            geom: Geom::Symbol { symbol: sym_id, first: 0, mode: SymMode::Loop, children: hit_shapes },
+            xf: s.xf,
+            ..Default::default()
+        };
+        dummy.encloses(p) || dummy.hit(p, 2.0)
+    }
+
     fn clickable_at(&self, p: P) -> Option<Shape> {
-        self.st.borrow().shapes().into_iter().rev().map(|(_, s)| s).find(|s| !s.on_click.trim().is_empty() && s.hit(p, 2.0))
+        // Buttons are clickable over their Hit area even without a script
+        // (so the pointer hand shows); other shapes need a click script.
+        self.st.borrow().shapes().into_iter().rev().map(|(_, s)| s).find(|s| {
+            if self.button_hit(s, p) {
+                return true;
+            }
+            !s.on_click.trim().is_empty() && s.hit(p, 2.0)
+        })
     }
 
     pub fn hover_clickable(&self, p: P) -> bool {

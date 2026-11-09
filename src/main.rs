@@ -83,6 +83,7 @@ fn selftest(dir: &std::path::Path) -> Result<(), String> {
     timer_selftest()?;
     sound_selftest(dir)?;
     symbol_selftest(dir)?;
+    guide_symbol_selftest(dir)?;
     fill_selftest()?;
     intro_selftest()?;
     scripted_selftest(dir)?;
@@ -323,7 +324,7 @@ pub fn platformer_movie() -> model::Document {
     acts.keys.get_mut(&4).unwrap().script = "me.goto_and_play(\"idle\");".into();
     insert_keyframe(&mut acts, 9, true);
     acts.keys.get_mut(&9).unwrap().script = "me.goto_and_play(\"run\");\nshout(\"run loop\");".into();
-    doc.symbols.push(Symbol { id: hero_id, name: "Hero".into(), layers: vec![acts, l] });
+    doc.symbols.push(Symbol { id: hero_id, name: "Hero".into(), layers: vec![acts, l], kind: SymbolKind::MovieClip });
     // Coin: 4 frames, plays once and stops itself on the last frame
     let coin_id = doc.alloc_id();
     let mut cl = Layer::new("Coin", 4, LAYER_COLORS[3]);
@@ -331,7 +332,7 @@ pub fn platformer_movie() -> model::Document {
     cl.keys.get_mut(&0).unwrap().shapes = vec![gold];
     insert_keyframe(&mut cl, 3, false);
     cl.keys.get_mut(&3).unwrap().script = "me.stop(); shout(\"coin done\");".into();
-    doc.symbols.push(Symbol { id: coin_id, name: "Coin".into(), layers: vec![cl] });
+    doc.symbols.push(Symbol { id: coin_id, name: "Coin".into(), layers: vec![cl], kind: SymbolKind::MovieClip });
     // stage
     let hero = Shape { id: doc.alloc_id(), name: "hero".into(), geom: Geom::Symbol { symbol: hero_id, first: 0, mode: SymMode::Loop, children: vec![] }, xf: Xform::at(100.0, 200.0), ..Default::default() };
     let coin = Shape { id: doc.alloc_id(), geom: Geom::Symbol { symbol: coin_id, first: 0, mode: SymMode::Loop, children: vec![] }, xf: Xform::at(300.0, 100.0), ..Default::default() };
@@ -340,6 +341,114 @@ pub fn platformer_movie() -> model::Document {
     doc.script = "let hero = obj(\"hero\");".into();
     doc.on_key = "if key == \"R\" { run(hero); }".into();
     doc
+}
+
+/// Guide layers + Graphic/Button symbol types (issue #3).
+fn guide_symbol_selftest(dir: &std::path::Path) -> Result<(), String> {
+    use model::*;
+    // --- guide layer: visible in editor, hidden in output/export/player
+    let mut doc = Document::new(200.0, 200.0, 10.0);
+    let ball = Shape { id: doc.alloc_id(), geom: Geom::Ellipse { rx: 10.0, ry: 10.0 }, xf: Xform::at(100.0, 100.0), fill: Some([255, 0, 0, 255]), ..Default::default() };
+    doc.layers[0].keys.get_mut(&0).unwrap().shapes = vec![ball];
+    let mut guide = Layer::with_kind("Guide_1", 1, LAYER_COLORS[1], LayerKind::Guide);
+    let gshape = Shape { id: doc.alloc_id(), geom: Geom::Rect { w: 100.0, h: 100.0, radius: 0.0 }, xf: Xform::at(100.0, 100.0), fill: Some([0, 255, 0, 255]), ..Default::default() };
+    guide.keys.get_mut(&0).unwrap().shapes = vec![gshape];
+    // guide script/sound must not run in output either
+    guide.keys.get_mut(&0).unwrap().script = "trace(\"guide script\");".into();
+    doc.layers.push(guide);
+    assert!(doc.layers[1].is_guide());
+    // editor render_list includes the guide (test via green pixel path: 2 shapes)
+    assert_eq!(doc.render_list(0).len(), 2, "editor should show guide art");
+    // output_list excludes it
+    assert_eq!(doc.output_list(0).len(), 1, "output should hide guide layers");
+    // export (PNG) must not contain the green guide rect at a corner only it covers
+    let pm = export::render_frame(&doc, 0, 1.0);
+    let corner = pm.pixel(55, 55).unwrap().demultiply();
+    // background is white (255,255,255); a leaked green guide would be (0,255,0)
+    assert!(corner.red() > 200, "guide leaked into export: {corner:?}");
+    // runtime must not run guide scripts
+    let mut rt = runtime::Runtime::new(doc.clone());
+    rt.tick(0.1);
+    assert!(!rt.take_log().iter().any(|l| l.contains("guide script")), "guide script ran in player");
+    // serde round-trip preserves kind + defaults old JSON to Normal/MovieClip
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.layers[1].kind, LayerKind::Guide);
+    let old: Document = serde_json::from_str(r#"{"width":100,"height":100,"fps":10,"background":[255,255,255,255],"layers":[{"name":"L","visible":true,"locked":false,"outline":false,"color":[1,2,3,255],"len":1,"keys":{"0":{"shapes":[],"tween":{"kind":"None","ease":0,"spins":0}}}}],"next_id":1}"#).unwrap();
+    assert_eq!(old.layers[0].kind, LayerKind::Normal);
+    // --- Graphic: synced to parent playhead
+    let mut gdoc = Document::new(200.0, 200.0, 10.0);
+    let gid = gdoc.alloc_id();
+    let mut gsym = Symbol::new(gid, "Fig".into(), SymbolKind::Graphic, LAYER_COLORS[0]);
+    // 2 frames: red then blue
+    let mut gl = gsym.layers.remove(0);
+    gl.len = 2;
+    let r = Shape { id: gdoc.alloc_id(), geom: Geom::Rect { w: 20.0, h: 20.0, radius: 0.0 }, fill: Some([255, 0, 0, 255]), ..Default::default() };
+    let b = Shape { id: gdoc.alloc_id(), geom: Geom::Rect { w: 20.0, h: 20.0, radius: 0.0 }, fill: Some([0, 0, 255, 255]), ..Default::default() };
+    gl.keys.get_mut(&0).unwrap().shapes = vec![r];
+    gl.keys.insert(1, Keyframe { shapes: vec![b], ..Default::default() });
+    gsym.layers.push(gl);
+    gdoc.symbols.push(gsym);
+    // place instance at frame 5 (so local=0 but parent frame 5 % 2 = 1 => blue)
+    let inst = Shape { id: gdoc.alloc_id(), name: "fig".into(), geom: Geom::Symbol { symbol: gid, first: 0, mode: SymMode::Loop, children: vec![] }, xf: Xform::at(100.0, 100.0), ..Default::default() };
+    gdoc.layers[0].len = 10;
+    insert_keyframe(&mut gdoc.layers[0], 5, true);
+    gdoc.layers[0].keys.get_mut(&5).unwrap().shapes = vec![inst];
+    let at5 = gdoc.output_list(5);
+    let fig = at5.iter().find(|(_, s)| s.name == "fig").unwrap().1.flatten();
+    assert_eq!(fig[0].fill, Some([0, 0, 255, 255]), "Graphic should sync to parent frame (5 -> frame 2/blue)");
+    let at4 = gdoc.output_list(4);
+    assert!(at4.iter().find(|(_, s)| s.name == "fig").is_none(), "no instance before its keyframe");
+    // --- Button: 4 frames, Hit never drawn, mouse drives Up/Over/Down
+    let mut bdoc = Document::new(200.0, 200.0, 10.0);
+    let bid = bdoc.alloc_id();
+    let mut bsym = Symbol::new(bid, "Btn".into(), SymbolKind::Button, LAYER_COLORS[0]);
+    assert_eq!(bsym.frame_count(), 4);
+    assert_eq!(bsym.layers[0].keys[&0].label, "Up");
+    assert_eq!(bsym.layers[0].keys[&1].label, "Over");
+    assert_eq!(bsym.layers[0].keys[&2].label, "Down");
+    assert_eq!(bsym.layers[0].keys[&3].label, "Hit");
+    let up = Shape { id: bdoc.alloc_id(), geom: Geom::Rect { w: 80.0, h: 40.0, radius: 0.0 }, fill: Some([255, 0, 0, 255]), ..Default::default() };
+    let over = Shape { id: bdoc.alloc_id(), geom: Geom::Rect { w: 80.0, h: 40.0, radius: 0.0 }, fill: Some([0, 255, 0, 255]), ..Default::default() };
+    let down = Shape { id: bdoc.alloc_id(), geom: Geom::Rect { w: 80.0, h: 40.0, radius: 0.0 }, fill: Some([0, 0, 255, 255]), ..Default::default() };
+    let hit = Shape { id: bdoc.alloc_id(), geom: Geom::Rect { w: 80.0, h: 40.0, radius: 0.0 }, fill: Some([255, 255, 0, 255]), ..Default::default() };
+    bsym.layers[0].keys.get_mut(&0).unwrap().shapes = vec![up.clone()];
+    bsym.layers[0].keys.get_mut(&1).unwrap().shapes = vec![over.clone()];
+    bsym.layers[0].keys.get_mut(&2).unwrap().shapes = vec![down.clone()];
+    bsym.layers[0].keys.get_mut(&3).unwrap().shapes = vec![hit.clone()];
+    bdoc.symbols.push(bsym);
+    let binst = Shape { id: bdoc.alloc_id(), name: "btn".into(), geom: Geom::Symbol { symbol: bid, first: 0, mode: SymMode::Loop, children: vec![] }, xf: Xform::at(100.0, 100.0), on_click: "trace(\"btn clicked\");".into(), ..Default::default() };
+    bdoc.layers[0].keys.get_mut(&0).unwrap().shapes = vec![binst];
+    // editor/output default shows Up, never Hit yellow
+    let out = bdoc.output_list(0);
+    let btn = out.iter().find(|(_, s)| s.name == "btn").unwrap().1.flatten();
+    assert_eq!(btn[0].fill, Some([255, 0, 0, 255]), "button default should be Up/red");
+    // symbol_shapes(Hit) is empty for previews
+    assert!(bdoc.symbol_shapes(bid, 3).is_empty());
+    // runtime mouse states
+    let mut rt = runtime::Runtime::new(bdoc.clone());
+    let col = |rt: &runtime::Runtime| rt.shapes().into_iter().find(|(_, s)| s.name == "btn").unwrap().1.flatten()[0].fill.unwrap();
+    assert_eq!(col(&rt), [255, 0, 0, 255], "initial Up");
+    rt.set_input([100.0, 100.0], Default::default());
+    rt.tick(0.1);
+    assert_eq!(col(&rt), [0, 255, 0, 255], "hover should be Over/green");
+    rt.set_mouse_down(true);
+    rt.tick(0.1);
+    assert_eq!(col(&rt), [0, 0, 255, 255], "pressed should be Down/blue");
+    rt.set_mouse_down(false);
+    rt.click([100.0, 100.0]);
+    assert!(rt.take_log().iter().any(|l| l.contains("btn clicked")), "button click script should run");
+    // moving away returns to Up
+    rt.set_input([10.0, 10.0], Default::default());
+    rt.tick(0.1);
+    assert_eq!(col(&rt), [255, 0, 0, 255], "away should be Up again");
+    // flx round-trip keeps kinds
+    let bytes = flx::encode(&bdoc)?;
+    let back = flx::decode(&bytes)?;
+    assert_eq!(back.symbols[0].kind, SymbolKind::Button);
+    flx::save(&bdoc, &dir.join("button.flx"))?;
+    println!("guide+graphic+button ok");
+    Ok(())
 }
 
 fn symbol_selftest(dir: &std::path::Path) -> Result<(), String> {

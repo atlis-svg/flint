@@ -632,6 +632,7 @@ impl Player {
         let (hover, events, keys) = ctx.input(|i| (i.pointer.hover_pos(), i.events.clone(), i.keys_down.iter().map(|k| k.name().to_string()).collect::<HashSet<_>>()));
         let mouse = hover.map(|p| view.to_stage(p)).unwrap_or([0.0, 0.0]);
         rt.set_input(mouse, if typing { HashSet::new() } else { keys });
+        rt.set_mouse_down(ctx.input(|i| i.pointer.primary_down()));
         if !typing {
             for ev in &events {
                 if let egui::Event::Key { key, pressed: true, repeat: false, .. } = ev {

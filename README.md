@@ -23,9 +23,9 @@ Draw, animate on a timeline, script with a built-in language, publish to a singl
 **Editor**
 - Animate-style layout: tools, stage + pasteboard, layered timeline, properties, library
 - Vector tools: Selection, Free Transform, Pencil, Brush, Line, Rectangle (rounded), Oval, Paint Bucket, Ink Bottle, Eyedropper, Eraser (splits strokes), Text, Hand, Zoom — with Animate's shortcut keys
-- Timeline: layers (show / lock / outline), frames, keyframes, blank keyframes (F5 / F6 / F7), frame labels, onion skinning, scrubbing
+- Timeline: layers (show / lock / outline, **Normal or Guide** — guide layers are translucent reference art in the editor and hidden in the player and exports), frames, keyframes, blank keyframes (F5 / F6 / F7), frame labels, onion skinning, scrubbing
 - **Classic tweens** (position, scale, rotation, color, easing, spins) and **shape tweens** (morphing)
-- **Symbols** with their own timelines (F8), a Library, edit-in-isolation, nested symbols
+- **Symbols** with their own timelines (F8 / Ctrl+F8 opens an Animate-style **New Symbol panel**: name + **Movie Clip / Graphic / Button** type + Loop / Play Once / Single Frame), a Library, edit-in-isolation, nested symbols. **Graphic** symbols sync to the parent timeline; **Button** symbols have fixed **Up / Over / Down / Hit** frames (Hit defines the click area and is never drawn)
 - Groups (Ctrl+G), Distribute to Layers, align, arrange, flip, grid & snapping, undo/redo, copy/paste
 - Export: PNG, PNG sequence, animated GIF, SVG
 

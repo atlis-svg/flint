@@ -93,7 +93,7 @@ pub fn render_frame(doc: &Document, f: usize, scale: f32) -> Pixmap {
     let bg = doc.background;
     pm.fill(tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], bg[3]));
     let tf = Transform::from_scale(scale, scale);
-    for s in doc.render_list(f).into_iter().flat_map(|(_, s)| s.flatten()) {
+    for s in doc.output_list(f).into_iter().flat_map(|(_, s)| s.flatten()) {
         if s.is_text() {
             if let (Some(fill), Some(path)) = (s.fill, text_path(&s)) {
                 pm.fill_path(&path, &paint(fill), FillRule::Winding, tf, None);
@@ -166,7 +166,7 @@ pub fn export_svg(doc: &Document, f: usize, path: &Path) -> Result<(), String> {
         w = doc.width,
         h = doc.height
     );
-    for sh in doc.render_list(f).into_iter().flat_map(|(_, s)| s.flatten()) {
+    for sh in doc.output_list(f).into_iter().flat_map(|(_, s)| s.flatten()) {
         if let Geom::Text { text, size } = &sh.geom {
             let Some(fill) = sh.fill else { continue };
             let deg = sh.xf.rot.to_degrees();
@@ -221,7 +221,7 @@ pub fn export_soundtrack(doc: &Document, path: &Path) -> Result<usize, String> {
     for f in 0..frames {
         let off = ((f as f32 / doc.fps.max(1.0)) * RATE as f32) as usize;
         for layer in &doc.layers {
-            if f >= layer.len {
+            if layer.is_guide() || f >= layer.len {
                 continue;
             }
             let Some(kf) = layer.keys.get(&f) else { continue };
