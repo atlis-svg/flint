@@ -209,3 +209,70 @@ pub fn export_svg(doc: &Document, f: usize, path: &Path) -> Result<(), String> {
     s += "</svg>\n";
     std::fs::write(path, s).map_err(|e| e.to_string())
 }
+
+/// Mix all keyframe sound cues into a mono 16-bit WAV at 44100 Hz.
+pub fn export_soundtrack(doc: &Document, path: &Path) -> Result<usize, String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    const RATE: u32 = 44100;
+    let frames = doc.frame_count();
+    let total = ((frames as f32 / doc.fps.max(1.0)) * RATE as f32).ceil() as usize + 1;
+    let mut mix = vec![0f32; total];
+    let mut cues = 0usize;
+    for f in 0..frames {
+        let off = ((f as f32 / doc.fps.max(1.0)) * RATE as f32) as usize;
+        for layer in &doc.layers {
+            if f >= layer.len {
+                continue;
+            }
+            let Some(kf) = layer.keys.get(&f) else { continue };
+            let Some(id) = kf.sound else { continue };
+            let Some(snd) = doc.sounds.iter().find(|s| s.id == id) else { continue };
+            let Ok(bytes) = B64.decode(snd.data.as_bytes()) else { continue };
+            let Ok(dec) = rodio::Decoder::new(std::io::Cursor::new(bytes)) else { continue };
+            let vol = if (0.0..=1.0).contains(&snd.volume) && snd.volume > 0.0 { snd.volume } else { 0.8 };
+            let mut samples: Vec<f32> = dec.collect();
+            if samples.is_empty() {
+                continue;
+            }
+            if snd.loop_ {
+                // tile to fill rest of movie from cue
+                let mut tiled = Vec::new();
+                let mut i = 0;
+                while tiled.len() < total.saturating_sub(off) {
+                    tiled.push(samples[i % samples.len()]);
+                    i += 1;
+                }
+                samples = tiled;
+            }
+            for (i, s) in samples.iter().enumerate() {
+                if off + i < mix.len() {
+                    // rodio yields -1.0..1.0 f32 already
+                    mix[off + i] += *s * vol;
+                }
+            }
+            cues += 1;
+        }
+    }
+    // Write WAV (mono, 16-bit, 44100)
+    let mut wav = Vec::with_capacity(44 + mix.len() * 2);
+    let data_len = (mix.len() * 2) as u32;
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&RATE.to_le_bytes());
+    wav.extend_from_slice(&(RATE * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    for s in &mix {
+        let v = s.clamp(-1.0, 1.0);
+        wav.extend_from_slice(&(v * 32767.0).round().clamp(-32768.0, 32767.0).to_le_bytes());
+    }
+    std::fs::write(path, wav).map_err(|e| e.to_string())?;
+    Ok(cues)
+}

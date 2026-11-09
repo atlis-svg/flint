@@ -46,6 +46,7 @@ struct Showing {
 
 struct Player {
     rt: Option<Runtime>,
+    audio: Option<flint::audio::SoundPlayer>,
     name: String,
     error: Option<String>,
     output: Vec<String>,
@@ -650,6 +651,17 @@ impl Player {
         }
         let dt = ctx.input(|i| i.stable_dt) as f64;
         rt.tick(dt);
+        {
+            let ids = rt.take_sounds();
+            if !ids.is_empty() {
+                if let Some(audio) = &self.audio {
+                    let doc = rt.doc();
+                    for id in &ids {
+                        audio.play_id(&doc, *id);
+                    }
+                }
+            }
+        }
         ctx.request_repaint();
 
         let painter = ui.painter_at(stage);
@@ -717,6 +729,7 @@ impl Player {
 fn main() -> eframe::Result {
     let mut player = Player {
         rt: None,
+        audio: flint::audio::SoundPlayer::new().ok(),
         name: String::new(),
         error: None,
         output: Vec::new(),

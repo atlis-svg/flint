@@ -40,6 +40,8 @@ struct State {
     current_timer: Option<i64>,
     /// Playheads of symbol instances on stage, by instance id.
     clips: HashMap<u64, Clip>,
+    /// Sound ids triggered by enter() since the last take_sounds() call.
+    pending_sounds: Vec<u64>,
 }
 
 struct Clip {
@@ -512,6 +514,7 @@ impl Runtime {
             cancelled: HashSet::new(),
             current_timer: None,
             clips: HashMap::new(),
+            pending_sounds: Vec::new(),
         }));
         let engine = build_engine(&st);
         let mut rt = Runtime { st, engine, scope: Scope::new(), cache: HashMap::new(), lib: AST::empty(), fn_lib: AST::empty(), accum: 0.0 };
@@ -545,6 +548,11 @@ impl Runtime {
 
     pub fn doc(&self) -> std::cell::Ref<'_, Document> {
         std::cell::Ref::map(self.st.borrow(), |s| &s.doc)
+    }
+
+    /// Drain sound cues triggered since the last call (ids into `doc.sounds`).
+    pub fn take_sounds(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.st.borrow_mut().pending_sounds)
     }
 
     fn build_fn_lib(&mut self) {
@@ -690,6 +698,9 @@ impl Runtime {
                 let mut st = self.st.borrow_mut();
                 st.frame = f.min(st.total() - 1);
                 let fr = st.frame;
+                // Sound cues on this frame (collect first to avoid borrow conflict)
+                let cues: Vec<u64> = st.doc.layers.iter().filter_map(|l| if fr < l.len { l.keys.get(&fr).and_then(|k| k.sound) } else { None }).collect();
+                st.pending_sounds.extend(cues);
                 st.doc
                     .layers
                     .iter()

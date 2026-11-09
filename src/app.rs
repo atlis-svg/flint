@@ -112,6 +112,7 @@ pub struct FlintApp {
     prop_active: bool,
     last_title: String,
     view: View,
+    audio: Option<crate::audio::SoundPlayer>,
 }
 
 impl FlintApp {
@@ -186,6 +187,7 @@ impl FlintApp {
             prop_active: false,
             last_title: String::new(),
             view: View { origin: Pos2::ZERO, zoom: 1.0 },
+            audio: crate::audio::SoundPlayer::new().ok(),
         }
     }
 
@@ -607,6 +609,7 @@ impl FlintApp {
                 Some(player) => flx::write_projector(&player, &doc, &p).map(|_| format!("Projector written to {} — runs without Flint installed", p.display())),
                 None => Err("flint-player not found next to flint; build it with `cargo build --release`".into()),
             }),
+            "wav" => rfd::FileDialog::new().add_filter("WAV", &["wav"]).set_file_name(format!("{base}.wav")).save_file().map(|p| export::export_soundtrack(&doc, &p).map(|n| format!("Exported soundtrack ({n} cues) to {}", p.display()))),
             _ => rfd::FileDialog::new().add_filter("SVG", &["svg"]).set_file_name(format!("{base}.svg")).save_file().map(|p| export::export_svg(&doc, main_frame, &p).map(|_| format!("Exported {}", p.display()))),
         };
         if let Some(r) = res {
@@ -858,6 +861,10 @@ impl FlintApp {
                         self.export("svg");
                         ui.close();
                     }
+                    if ui.button("Export Soundtrack (WAV)…").clicked() {
+                        self.export("wav");
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Export Flint Movie (.flx)…").clicked() {
                         self.export("flx");
@@ -942,6 +949,10 @@ impl FlintApp {
             ui.menu_button("Insert", |ui| {
                 if ui.button("New Symbol…   Ctrl+F8").clicked() {
                     self.new_symbol();
+                    ui.close();
+                }
+                if ui.button("Import Sound…").clicked() {
+                    self.import_sound();
                     ui.close();
                 }
                 if ui.button("New Layer").clicked() {
@@ -1406,6 +1417,34 @@ impl FlintApp {
                     self.doc.layers[li].keys.get_mut(&k).unwrap().tween = tw;
                     changed = true;
                 }
+                // Sound cue for this keyframe
+                {
+                    let cur = self.doc.layers[li].keys[&k].sound;
+                    let mut sel = cur.map(|id| self.doc.sounds.iter().position(|s| s.id == id).map(|i| i + 1).unwrap_or(0)).unwrap_or(0);
+                    egui::ComboBox::from_label("Sound").selected_text(if sel == 0 { "None".to_string() } else { self.doc.sounds[sel - 1].name.clone() }).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut sel, 0, "None");
+                        for (i, s) in self.doc.sounds.iter().enumerate() {
+                            ui.selectable_value(&mut sel, i + 1, &s.name);
+                        }
+                    });
+                    let new = if sel == 0 { None } else { Some(self.doc.sounds[sel - 1].id) };
+                    if new != cur {
+                        self.doc.layers[li].keys.get_mut(&k).unwrap().sound = new;
+                        changed = true;
+                    }
+                    if new.is_some() {
+                        if let Some(s) = self.doc.sounds.iter_mut().find(|s| Some(s.id) == new) {
+                            let mut vol = s.volume;
+                            ui.add(egui::Slider::new(&mut vol, 0.0..=1.0).text("Volume"));
+                            if (vol - s.volume).abs() > 0.001 { s.volume = vol; changed = true; }
+                            ui.horizontal(|ui| {
+                                let mut lp = s.loop_;
+                                ui.checkbox(&mut lp, "Loop");
+                                if lp != s.loop_ { s.loop_ = lp; changed = true; }
+                            });
+                        }
+                    }
+                }
             } else {
                 ui.label("(empty frame)");
             }
@@ -1733,6 +1772,9 @@ impl FlintApp {
                 }
                 if !kf.script.trim().is_empty() {
                     p.text(Pos2::new(cx(k), y + 1.0), Align2::CENTER_TOP, "a", FontId::proportional(11.0), Color32::from_rgb(20, 20, 20));
+                }
+                if kf.sound.is_some() {
+                    p.text(Pos2::new(cx(k), y + 1.0), Align2::CENTER_TOP, "♪", FontId::proportional(11.0), Color32::from_rgb(190, 60, 140));
                 }
                 if !kf.label.is_empty() {
                     p.text(Pos2::new(cx(k) - 3.0, y + 2.0), Align2::LEFT_TOP, format!("⚑{}", kf.label), FontId::proportional(10.0), Color32::from_rgb(180, 20, 20));
@@ -2526,6 +2568,7 @@ impl eframe::App for FlintApp {
             self.play_accum += dt;
             let step = 1.0 / self.doc.fps.max(1.0) as f64;
             let total = self.doc.frame_count();
+            let prev_frame = self.frame;
             while self.play_accum >= step {
                 self.play_accum -= step;
                 if self.frame + 1 >= total {
@@ -2537,6 +2580,16 @@ impl eframe::App for FlintApp {
                     }
                 } else {
                     self.frame += 1;
+                }
+            }
+            // Editor preview: play sound cue on the frame we entered
+            if self.frame != prev_frame {
+                if let Some(audio) = &self.audio {
+                    let fr = self.frame;
+                    let ids: Vec<u64> = self.doc.layers.iter().filter_map(|l| if fr < l.len { l.keys.get(&fr).and_then(|k| k.sound) } else { None }).collect();
+                    for id in ids {
+                        audio.play_id(&self.doc, id);
+                    }
                 }
             }
             self.prune_sel();
@@ -3090,6 +3143,21 @@ impl FlintApp {
         self.status = format!("Converted to symbol \"{name}\" — double-click it to animate inside");
     }
 
+    fn import_sound(&mut self) {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine};
+        if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "mp3", "ogg"]).pick_file() {
+            if let Ok(bytes) = std::fs::read(&p) {
+                self.checkpoint();
+                let id = self.doc.alloc_id();
+                let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "sound".to_string());
+                // Frame length: size/1024 guess (good enough for timeline/export; playback uses native length)
+                let frames = ((bytes.len() as f32 / 1024.0) as usize).max(1);
+                self.doc.sounds.push(crate::model::Sound { id, name: name.clone(), data: B64.encode(bytes), loop_: false, volume: 0.8, frames });
+                self.status = format!("Imported sound \"{}\"", name);
+            }
+        }
+    }
+
     /// Ctrl+F8: makes an empty symbol and opens it for editing.
     fn new_symbol(&mut self) {
         self.checkpoint();
@@ -3106,6 +3174,35 @@ impl FlintApp {
     }
 
     fn library_panel(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("➕ Import Sound…").clicked() {
+                self.import_sound();
+            }
+        });
+        if !self.doc.sounds.is_empty() {
+            ui.separator();
+            ui.strong(format!("Sounds ({})", self.doc.sounds.len()));
+            let sounds: Vec<(u64, String)> = self.doc.sounds.iter().map(|s| (s.id, s.name.clone())).collect();
+            for (id, name) in &sounds {
+                ui.horizontal(|ui| {
+                    ui.label(format!("♪ {name}"));
+                    if ui.button("▶").clicked() {
+                        if let Some(audio) = &self.audio {
+                            audio.play_id(&self.doc, *id);
+                        }
+                    }
+                    if ui.button("🗑").clicked() {
+                        let in_use = self.doc.layers.iter().any(|l| l.keys.values().any(|k| k.sound == Some(*id))) || self.doc.symbols.iter().flat_map(|s| &s.layers).any(|l| l.keys.values().any(|k| k.sound == Some(*id)));
+                        if in_use {
+                            self.status = "Can't delete: sound is used by a keyframe".into();
+                        } else {
+                            self.checkpoint();
+                            self.doc.sounds.retain(|s| s.id != *id);
+                        }
+                    }
+                });
+            }
+        }
         ui.horizontal(|ui| {
             if ui.button("➕ New Symbol").on_hover_text("Ctrl+F8").clicked() {
                 self.new_symbol();

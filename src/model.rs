@@ -30,6 +30,9 @@ pub struct Document {
     pub hub_id: Option<i64>,
     #[serde(default)]
     pub symbols: Vec<Symbol>,
+    /// Sound library: imported audio (wav/mp3/ogg bytes as base64).
+    #[serde(default)]
+    pub sounds: Vec<Sound>,
     /// Functions available to every script in the movie.
     #[serde(default)]
     pub functions: String,
@@ -57,6 +60,9 @@ pub struct Keyframe {
     /// Frame actions, run when the playhead enters this keyframe.
     #[serde(default)]
     pub script: String,
+    /// Sound id (into Document.sounds) played when the playhead enters this keyframe.
+    #[serde(default)]
+    pub sound: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
@@ -151,6 +157,21 @@ pub struct Symbol {
     pub id: u64,
     pub name: String,
     pub layers: Vec<Layer>,
+}
+
+/// A library sound: audio file bytes as base64 (wav/mp3/ogg).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Sound {
+    pub id: u64,
+    pub name: String,
+    pub data: String,
+    #[serde(default)]
+    pub loop_: bool,
+    #[serde(default)]
+    pub volume: f32,
+    /// Length in frames at import (used for timeline/export sizing).
+    #[serde(default)]
+    pub frames: usize,
 }
 
 impl Symbol {
@@ -734,6 +755,7 @@ impl Document {
             on_key: String::new(),
             hub_id: None,
             symbols: Vec::new(),
+            sounds: Vec::new(),
             functions: String::new(),
             edit_stack: Vec::new(),
         }

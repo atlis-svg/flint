@@ -81,6 +81,7 @@ fn selftest(dir: &std::path::Path) -> Result<(), String> {
     export::export_svg(&doc, 6, &dir.join("selftest_f7.svg"))?;
     group_selftest()?;
     timer_selftest()?;
+    sound_selftest(dir)?;
     symbol_selftest(dir)?;
     fill_selftest()?;
     intro_selftest()?;
@@ -523,5 +524,47 @@ fn intro_selftest() -> Result<(), String> {
     let log = rt.take_log();
     assert!(!log.iter().any(|l| l.contains("error")), "{log:?}");
     println!("intro ok ({frames} frames, {:.1}s)", frames as f64 / fps);
+    Ok(())
+}
+
+fn sound_selftest(dir: &std::path::Path) -> Result<(), String> {
+    use crate::model::{Document, Sound};
+    // Minimal WAV bytes (0.1s 440Hz sine, mono 44.1kHz 16-bit) with sound cue on frame 0
+    let rate = 44100usize;
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&((36 + 4410 * 2) as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&(rate as u32).to_le_bytes());
+    wav.extend_from_slice(&((rate * 2) as u32).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&((4410 * 2) as u32).to_le_bytes());
+    for i in 0..4410 {
+        let s = ((i as f32 * 440.0 / rate as f32) * 6.2831).sin();
+        wav.extend_from_slice(&(s * 12000.0).round().clamp(-32768.0, 32767.0).to_le_bytes());
+    }
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    let mut doc = Document::new(320.0, 240.0, 30.0);
+    let sid = doc.alloc_id();
+    doc.sounds.push(Sound { id: sid, name: "beep".into(), data: B64.encode(&wav), loop_: false, volume: 0.8, frames: 3 });
+    let sid = doc.sounds[0].id;
+    doc.layers[0].keys.get_mut(&0).unwrap().sound = Some(sid);
+    // encode/decode round-trip (old files ignore new fields via serde default, too)
+    let bytes = flx::encode(&doc)?;
+    let back = flx::decode(&bytes)?;
+    assert_eq!(back.sounds.len(), 1);
+    assert_eq!(back.layers[0].keys[&0].sound, Some(sid));
+    // runtime queues the cue on enter(0)
+    let mut rt = runtime::Runtime::new(back);
+    assert!(rt.take_sounds().contains(&sid));
+    // soundtrack export writes a WAV
+    export::export_soundtrack(&doc, &dir.join("selftest_soundtrack.wav"))?;
+    assert!(std::fs::metadata(dir.join("selftest_soundtrack.wav")).map(|m| m.len()).unwrap_or(0) > 44);
+    println!("sound ok (encode/decode + cue + WAV export)");
     Ok(())
 }
