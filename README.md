@@ -18,6 +18,8 @@ Draw, animate on a timeline, script with a built-in language, publish to a singl
 
 </div>
 
+**Flint sites:** [GitHub](https://github.com/atlis-svg/flint) · [Latest release](https://github.com/atlis-svg/flint/releases/latest) · [Flint Hub](https://flint-hub.v0rt3xv1sta.workers.dev) · [CI](https://github.com/atlis-svg/flint/actions/workflows/ci.yml)
+
 ## Features
 
 **Editor**

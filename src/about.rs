@@ -9,6 +9,8 @@ pub fn window(ctx: &egui::Context, open: &mut bool, app: &str) {
         ui.label(egui::RichText::new("One app, lots").italics().color(egui::Color32::from_rgb(255, 140, 70)));
         ui.label("Copyright © 2026 Jasper Gulka. Open source under the MIT or Apache-2.0 license.");
         ui.hyperlink_to("github.com/atlis-svg/flint", "https://github.com/atlis-svg/flint");
+        ui.hyperlink_to("Flint Hub", "https://flint-hub.v0rt3xv1sta.workers.dev");
+        ui.hyperlink_to("Latest release", "https://github.com/atlis-svg/flint/releases/latest");
         ui.label("Movies, games and projectors you make with Flint are yours to share.");
         ui.label(egui::RichText::new("AI disclosure: most of Flint's code was written by Claude (Anthropic) via Claude Code, directed and reviewed by Jasper Gulka.").small().weak());
         ui.separator();
