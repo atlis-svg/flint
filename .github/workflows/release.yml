@@ -40,7 +40,7 @@ jobs:
           key: ${{ matrix.target }}
       - name: Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev libwayland-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev libwayland-dev libasound2-dev libpulse-dev
       - name: Build
         run: cargo build --release --bins --target ${{ matrix.target }}
       - name: Headless selftest

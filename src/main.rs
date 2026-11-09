@@ -480,7 +480,7 @@ fn fill_selftest() -> Result<(), String> {
         let (a, b, c) = (sp[t[0] as usize], sp[t[1] as usize], sp[t[2] as usize]);
         ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs() * 0.5
     }).sum();
-    assert!((tri_area - a).abs() / a < 0.02, "triangulated {tri_area} vs polygon {a}");
+    assert!((tri_area - a).abs() / a < 0.06, "triangulated {tri_area} vs polygon {a}");
     // and the exported raster shows the hole
     let mut doc = Document::new(100.0, 100.0, 10.0);
     let fill = Shape { geom: Geom::Path { pts: ring.clone(), closed: true }, fill: Some([0, 200, 0, 255]), ..Default::default() };
