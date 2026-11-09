@@ -501,10 +501,16 @@ fn export_cli(input: &std::path::Path, out: &std::path::Path, frame: usize) -> R
         "gif" => {
             export::export_gif(&doc, out)?;
         }
+        "mp4" => {
+            export::export_mp4(&doc, out)?;
+        }
+        "wav" => {
+            export::export_soundtrack(&doc, out)?;
+        }
         "flx" => {
             flx::save(&doc, out)?;
         }
-        other => return Err(format!("unknown output type .{other} (use png, gif, svg or flx)")),
+        other => return Err(format!("unknown output type .{other} (use png, gif, mp4, wav, svg or flx)")),
     }
     println!("{}", out.display());
     Ok(())

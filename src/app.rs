@@ -610,6 +610,7 @@ impl FlintApp {
                 None => Err("flint-player not found next to flint; build it with `cargo build --release`".into()),
             }),
             "wav" => rfd::FileDialog::new().add_filter("WAV", &["wav"]).set_file_name(format!("{base}.wav")).save_file().map(|p| export::export_soundtrack(&doc, &p).map(|n| format!("Exported soundtrack ({n} cues) to {}", p.display()))),
+            "mp4" => rfd::FileDialog::new().add_filter("MP4", &["mp4"]).set_file_name(format!("{base}.mp4")).save_file().map(|p| export::export_mp4(&doc, &p).map(|n| format!("Exported {n}-frame MP4 to {}", p.display()))),
             _ => rfd::FileDialog::new().add_filter("SVG", &["svg"]).set_file_name(format!("{base}.svg")).save_file().map(|p| export::export_svg(&doc, main_frame, &p).map(|_| format!("Exported {}", p.display()))),
         };
         if let Some(r) = res {
@@ -859,6 +860,10 @@ impl FlintApp {
                     }
                     if ui.button("Export Frame as SVG…").clicked() {
                         self.export("svg");
+                        ui.close();
+                    }
+                    if ui.button("Export MP4 Video…").clicked() {
+                        self.export("mp4");
                         ui.close();
                     }
                     if ui.button("Export Soundtrack (WAV)…").clicked() {
@@ -3145,7 +3150,7 @@ impl FlintApp {
 
     fn import_sound(&mut self) {
         use base64::{engine::general_purpose::STANDARD as B64, Engine};
-        if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "mp3", "ogg"]).pick_file() {
+        if let Some(p) = rfd::FileDialog::new().add_filter("Audio", &["wav", "mp3", "ogg", "flac", "m4a", "mp4", "aac", "aiff"]).pick_file() {
             if let Ok(bytes) = std::fs::read(&p) {
                 self.checkpoint();
                 let id = self.doc.alloc_id();

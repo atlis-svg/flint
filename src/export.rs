@@ -276,3 +276,54 @@ pub fn export_soundtrack(doc: &Document, path: &Path) -> Result<usize, String> {
     std::fs::write(path, wav).map_err(|e| e.to_string())?;
     Ok(cues)
 }
+
+
+/// Export MP4 video (H.264) with the soundtrack muxed in, via ffmpeg.
+/// Frames are rendered to a temp dir; ffmpeg must be on PATH (or ffmpeg.exe next to the executable).
+pub fn export_mp4(doc: &Document, path: &Path) -> Result<usize, String> {
+    // 1. Render frames + soundtrack to temp files
+    let tmp = std::env::temp_dir().join(format!("flint-mp4-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let frames = doc.frame_count();
+    for f in 0..frames {
+        let pm = render_frame(doc, f, 1.0);
+        pm.save_png(tmp.join(format!("f_{:05}.png", f))).map_err(|e| e.to_string())?;
+    }
+    let wav = tmp.join("soundtrack.wav");
+    let _ = export_soundtrack(doc, &wav);
+    // 2. Find ffmpeg
+    let ffmpeg = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("ffmpeg.exe")))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "ffmpeg".to_string());
+    let fps = format!("{}", doc.fps.max(1.0));
+    let frames_pat = tmp.join("f_%05d.png").to_string_lossy().into_owned();
+    let wav_str = wav.to_string_lossy().into_owned();
+    let out_str = path.to_string_lossy().into_owned();
+    let mut args = vec![
+        "-y".to_string(), "-framerate".to_string(), fps, "-i".to_string(),
+        frames_pat,
+    ];
+    let has_audio = wav.exists() && std::fs::metadata(&wav).map(|m| m.len() > 44).unwrap_or(false);
+    if has_audio {
+        args.extend(["-i".to_string(), wav_str.clone()]);
+    }
+    args.extend(["-c:v".to_string(), "libx264".to_string(), "-pix_fmt".to_string(), "yuv420p".to_string()]);
+    if has_audio {
+        args.extend(["-c:a".to_string(), "aac".to_string(), "-b:a".to_string(), "128k".to_string(), "-shortest".to_string()]);
+    }
+    args.push(out_str);
+    let out = std::process::Command::new(&ffmpeg)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("ffmpeg not found ({e}) — install ffmpeg (https://ffmpeg.org) or drop ffmpeg.exe next to Flint"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!("ffmpeg failed: {}", err.lines().last().unwrap_or("see ffmpeg output")));
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(frames)
+}
