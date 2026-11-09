@@ -1,3 +1,4 @@
 /target
 /hub/node_modules
 /hub/.wrangler
+/ffmpeg.exe
