@@ -123,23 +123,41 @@ pub struct FlintApp {
     last_title: String,
     view: View,
     audio: Option<crate::audio::SoundPlayer>,
+    theme: crate::theme::Theme,
+    show_theme: bool,
+    /// The theme changed and still has to be written to disk.
+    theme_dirty: bool,
+    /// `--screenshot <file.png>`: saves a picture of the editor window.
+    screenshot: Option<PathBuf>,
+    screenshot_done: bool,
 }
 
 impl FlintApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
-        let mut vis = egui::Visuals::dark();
-        vis.panel_fill = Color32::from_gray(40);
-        vis.window_fill = Color32::from_gray(45);
-        vis.extreme_bg_color = Color32::from_gray(28);
-        vis.selection.bg_fill = Color32::from_rgb(38, 110, 210);
-        cc.egui_ctx.set_visuals(vis);
+        let theme = crate::theme::Theme::load();
+        cc.egui_ctx.set_visuals(theme.visuals());
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let mut app = Self::blank(Document::new(1280.0, 720.0, 24.0));
+        app.theme = theme;
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(i) = args.iter().position(|a| a == "--screenshot") {
+            app.screenshot = args.get(i + 1).map(PathBuf::from);
+        }
         app.intro = crate::intro::Intro::new();
         if let Some(p) = std::env::args().nth(1).filter(|a| !a.starts_with("--")) {
             app.open_path(PathBuf::from(p));
         }
         app
+    }
+
+    /// An editor showing `doc`, with the default settings.
+    pub fn with_document(doc: Document) -> Self {
+        Self::blank(doc)
+    }
+
+    /// The document being edited.
+    pub fn doc(&self) -> &Document {
+        &self.doc
     }
 
     fn blank(doc: Document) -> Self {
@@ -199,6 +217,11 @@ impl FlintApp {
             last_title: String::new(),
             view: View { origin: Pos2::ZERO, zoom: 1.0 },
             audio: crate::audio::SoundPlayer::new().ok(),
+            theme: crate::theme::Theme::default(),
+            show_theme: false,
+            theme_dirty: false,
+            screenshot: None,
+            screenshot_done: false,
         }
     }
 
@@ -501,12 +524,17 @@ impl FlintApp {
         self.prune_sel();
     }
     fn tl_set_tween(&mut self, kind: TweenKind) {
+        self.checkpoint();
+        self.set_tween_kind(kind);
+    }
+
+    /// Sets the tween kind on the current keyframe (no undo snapshot).
+    fn set_tween_kind(&mut self, kind: TweenKind) {
         let l = &self.doc.layers[self.layer];
         if self.frame >= l.len {
             return;
         }
         let k = l.key_at(self.frame);
-        self.checkpoint();
         let l = &mut self.doc.layers[self.layer];
         if kind != TweenKind::None && l.next_key(k).is_none_or(|n| n >= l.len) {
             // like Animate: tweening a span with no end keyframe adds one at the span end
@@ -516,7 +544,175 @@ impl FlintApp {
             }
         }
         l.keys.get_mut(&k).unwrap().tween.kind = kind;
-        self.status = format!("{kind:?} tween");
+        self.status = format!("{} tween", kind.label());
+    }
+
+    // ------------------------------------------------------------ motion paths
+
+    /// Selects objects by id on a layer.
+    pub fn select_ids(&mut self, li: usize, ids: &[u64]) {
+        self.sel = ids.iter().map(|id| (li, *id)).collect();
+    }
+
+    /// Moves the playhead to a frame.
+    pub fn set_frame_at(&mut self, f: usize) {
+        self.set_frame(f);
+    }
+
+    /// Works on a layer.
+    pub fn set_layer(&mut self, li: usize) {
+        self.layer = li;
+    }
+
+    /// The motion paths on the current layer: (shape id, world points).
+    fn layer_paths(&self) -> Vec<(u64, Vec<P>)> {
+        let Some(l) = self.doc.layers.get(self.layer) else { return Vec::new() };
+        let f = self.frame.min(l.len.saturating_sub(1));
+        l.shapes_at(f)
+            .into_iter()
+            .filter(|s| s.is_path)
+            .filter_map(|s| path_world_points(&s).map(|p| (s.id, p)))
+            .collect()
+    }
+
+    /// Whether the selection holds an object attached to a motion path.
+    fn has_motion_selection(&self) -> bool {
+        self.sel_shapes().iter().any(|(_, s)| s.motion.is_some())
+    }
+
+    /// Turns the selected strokes into motion paths: invisible guides that
+    /// objects can follow.
+    pub fn make_motion_paths(&mut self) {
+        let li = self.layer;
+        let ids: Vec<u64> = self.sel.iter().filter(|(l, _)| *l == li).map(|(_, id)| *id).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let frame = self.frame;
+        let l = &self.doc.layers[li];
+        let shapes = l.shapes_at(frame.min(l.len.saturating_sub(1)));
+        if !shapes.iter().any(|s| ids.contains(&s.id) && !s.is_path && matches!(s.geom, Geom::Path { .. })) {
+            self.status = "Only drawn strokes can become motion paths".into();
+            return;
+        }
+        self.checkpoint();
+        let mut n = 0;
+        for key in self.doc.layers[li].keys.values_mut() {
+            for s in key.shapes.iter_mut() {
+                if ids.contains(&s.id) && !s.is_path && matches!(s.geom, Geom::Path { .. }) {
+                    s.is_path = true;
+                    s.stroke = None;
+                    s.fill = None;
+                    n += 1;
+                }
+            }
+        }
+        self.dirty = true;
+        self.status = format!("{n} motion path(s) — select an object and press Follow Path");
+    }
+
+    /// Attaches the selected objects to a motion path and starts a motion tween.
+    pub fn follow_path(&mut self, path_id: u64) {
+        let li = self.layer;
+        let Some(l) = self.doc.layers.get(li) else { return };
+        if self.frame >= l.len {
+            return;
+        }
+        let k = l.key_at(self.frame);
+        let room = l.len > k + 1;
+        let ids: Vec<u64> = self.sel.iter().filter(|(l, _)| *l == li).map(|(_, id)| *id).collect();
+        if ids.is_empty() {
+            self.status = "Select the object that should follow the path".into();
+            return;
+        }
+        // where the object starts, so it keeps its offset from the path's start
+        let start = l.keys[&k].shapes.iter().find(|s| ids.contains(&s.id)).map(|s| (s.xf.x, s.xf.y));
+        let pts = l.keys[&k].shapes.iter().chain(l.keys.values().flat_map(|k| k.shapes.iter())).find(|s| s.id == path_id).and_then(path_world_points);
+        self.checkpoint();
+        let key = self.doc.layers[li].keys.get_mut(&k).unwrap();
+        let mut n = 0;
+        for s in key.shapes.iter_mut() {
+            if ids.contains(&s.id) && !s.is_path {
+                let orient = s.motion.map(|m| m.orient).unwrap_or(false);
+                s.motion = Some(Motion { path: path_id, orient });
+                n += 1;
+            }
+        }
+        if n == 0 {
+            self.status = "Motion paths can't follow other paths".into();
+            return;
+        }
+        self.set_tween_kind(TweenKind::Motion);
+        // put the end keyframe's object where the path ends
+        if let (Some((sx, sy)), Some(pts)) = (start, pts) {
+            let (end, _) = sample_path(&pts, 1.0);
+            let off = [sx - pts[0][0], sy - pts[0][1]];
+            let l = &mut self.doc.layers[li];
+            let k2 = l.next_key(k).filter(|k2| *k2 < l.len);
+            if let Some(k2) = k2 {
+                if let Some(key) = l.keys.get_mut(&k2) {
+                    for s in key.shapes.iter_mut() {
+                        if ids.contains(&s.id) {
+                            s.xf.x = end[0] + off[0];
+                            s.xf.y = end[1] + off[1];
+                        }
+                    }
+                }
+            }
+        }
+        self.dirty = true;
+        self.status = if room {
+            format!("{n} object(s) follow the motion path")
+        } else {
+            "Attached to the path — extend the timeline (F5) so the object has room to travel".to_string()
+        };
+    }
+
+    /// Removes the motion path from the selected objects.
+    pub fn detach_from_path(&mut self) {
+        let li = self.layer;
+        let ids: Vec<u64> = self.sel.iter().filter(|(l, _)| *l == li).map(|(_, id)| *id).collect();
+        if ids.is_empty() {
+            return;
+        }
+        if !self.sel_shapes().iter().any(|(_, s)| ids.contains(&s.id) && s.motion.is_some()) {
+            return;
+        }
+        self.checkpoint();
+        let mut n = 0;
+        for key in self.doc.layers[li].keys.values_mut() {
+            for s in key.shapes.iter_mut() {
+                if ids.contains(&s.id) && s.motion.take().is_some() {
+                    n += 1;
+                }
+            }
+        }        self.dirty = true;
+        self.status = format!("{n} object(s) detached from the motion path");
+    }
+
+    /// Turns the selected motion paths back into ordinary objects.
+    pub fn paths_to_art(&mut self) {
+        let li = self.layer;
+        let ids: Vec<u64> = self.sel.iter().filter(|(l, _)| *l == li).map(|(_, id)| *id).collect();
+        if ids.is_empty() {
+            return;
+        }
+        if !self.sel_shapes().iter().any(|(_, s)| ids.contains(&s.id) && s.is_path) {
+            return;
+        }
+        self.checkpoint();
+        let mut n = 0;
+        for key in self.doc.layers[li].keys.values_mut() {
+            for s in key.shapes.iter_mut() {
+                if ids.contains(&s.id) && s.is_path {
+                    s.is_path = false;
+                    s.stroke = Some([0, 0, 0, 255]);
+                    n += 1;
+                }
+            }
+        }
+        self.dirty = true;
+        self.status = format!("{n} path(s) turned back into objects");
     }
 
     fn add_layer(&mut self) {
@@ -584,11 +780,13 @@ impl FlintApp {
     fn open_path(&mut self, p: PathBuf) {
         match flx::load(&p) {
             Ok(doc) => {
-                let (tool, sc, fc) = (self.tool, self.stroke_col, self.fill_col);
+                let (tool, sc, fc, theme, shot) = (self.tool, self.stroke_col, self.fill_col, self.theme.clone(), self.screenshot.clone());
                 *self = Self::blank(doc);
                 self.tool = tool;
                 self.stroke_col = sc;
                 self.fill_col = fc;
+                self.theme = theme;
+                self.screenshot = shot;
                 self.status = format!("Opened {}", p.display());
                 // a published .flx opens as a new, unsaved document
                 self.path = (p.extension().and_then(|e| e.to_str()) != Some("flx")).then_some(p);
@@ -978,6 +1176,11 @@ impl FlintApp {
                     ui.add(egui::DragValue::new(&mut self.grid_size).range(2.0..=500.0).suffix(" px"));
                 });
                 ui.checkbox(&mut self.onion, "Onion Skin");
+                ui.separator();
+                if ui.button("Theme…").clicked() {
+                    self.show_theme = true;
+                    ui.close();
+                }
             });
             ui.menu_button("Insert", |ui| {
                 if ui.button("New Symbol…   Ctrl+F8").clicked() {
@@ -1018,6 +1221,14 @@ impl FlintApp {
                     self.tl_set_tween(TweenKind::Shape);
                     ui.close();
                 }
+                if ui.button("Create Motion Tween").clicked() {
+                    if self.has_motion_selection() {
+                        self.tl_set_tween(TweenKind::Motion);
+                    } else {
+                        self.status = "Attach the object to a motion path first (Properties ▸ Motion Path)".into();
+                    }
+                    ui.close();
+                }
             });
             ui.menu_button("Modify", |ui| {
                 let has = !self.sel.is_empty();
@@ -1038,6 +1249,27 @@ impl FlintApp {
                         self.distribute_to_layers();
                         ui.close();
                     }
+                    ui.separator();
+                    let paths = self.layer_paths();
+                    ui.menu_button("Motion Path", |ui| {
+                        if ui.button("Convert to Motion Path").clicked() {
+                            self.make_motion_paths();
+                            ui.close();
+                        }
+                        if ui.button("Detach from Path").clicked() {
+                            self.detach_from_path();
+                            ui.close();
+                        }
+                        if !paths.is_empty() {
+                            ui.separator();
+                            for (i, (pid, _)) in paths.iter().enumerate() {
+                                if ui.button(format!("Follow Path {}", i + 1)).clicked() {
+                                    self.follow_path(*pid);
+                                    ui.close();
+                                }
+                            }
+                        }
+                    });
                     ui.separator();
                     ui.menu_button("Arrange", |ui| {
                         for (lbl, v) in [("Bring to Front  Ctrl+Shift+↑", 3), ("Bring Forward  Ctrl+↑", 2), ("Send Backward  Ctrl+↓", 1), ("Send to Back  Ctrl+Shift+↓", 0)] {
@@ -1280,6 +1512,7 @@ impl FlintApp {
                     let mut c = false;
                     let mut ungroup_now = false;
                     let mut edit_symbol: Option<u64> = None;
+                    let mut motion: Option<MotionAction> = None;
                     egui::CollapsingHeader::new("Position and Size").default_open(true).show(ui, |ui| {
                         egui::Grid::new("xf").num_columns(4).show(ui, |ui| {
                             ui.label("X");
@@ -1403,6 +1636,41 @@ impl FlintApp {
                             });
                         }
                     }
+                    // Motion path
+                    {
+                        let paths = self.layer_paths();
+                        egui::CollapsingHeader::new("Motion Path").default_open(true).show(ui, |ui| {
+                            if s.is_path {
+                                ui.label("This object is a motion path.");
+                                ui.label(egui::RichText::new("Paths are guides: a dashed line in the editor, never drawn in the player or in exports.").small().weak());
+                                if ui.button("Turn back into an object").clicked() {
+                                    motion = Some(MotionAction::ToArt);
+                                }
+                            } else if let Some(m) = s.motion.as_mut() {
+                                ui.label("This object follows a motion path.");
+                                let mut orient = m.orient;
+                                if ui.checkbox(&mut orient, "Orient to path").changed() {
+                                    m.orient = orient;
+                                    c = true;
+                                }
+                                if ui.button("Detach from path").clicked() {
+                                    motion = Some(MotionAction::Detach);
+                                }
+                            } else if paths.is_empty() {
+                                ui.label(egui::RichText::new("No motion path on this layer yet. Draw a stroke with the Pencil, select it and press \"Convert to Motion Path\".").small().weak());
+                                if ui.button("Convert to a motion path").clicked() {
+                                    motion = Some(MotionAction::MakePath);
+                                }
+                            } else {
+                                ui.label("Follow a motion path:");
+                                for (i, (pid, pts)) in paths.iter().enumerate() {
+                                    if ui.button(format!("Path {} ({:.0} points)", i + 1, pts.len())).clicked() {
+                                        motion = Some(MotionAction::Follow(*pid));
+                                    }
+                                }
+                            }
+                        });
+                    }
                     if c {
                         changed = true;
                         if let Some(m) = self.doc.shape_mut(li, frame, s.id) {
@@ -1414,6 +1682,13 @@ impl FlintApp {
                     }
                     if let Some(id) = edit_symbol {
                         self.enter_symbol(id);
+                    }
+                    match motion {
+                        Some(MotionAction::Follow(pid)) => self.follow_path(pid),
+                        Some(MotionAction::Detach) => self.detach_from_path(),
+                        Some(MotionAction::MakePath) => self.make_motion_paths(),
+                        Some(MotionAction::ToArt) => self.paths_to_art(),
+                        None => {}
                     }
                 } else {
                     let mut stroke = s0.stroke;
@@ -1438,6 +1713,39 @@ impl FlintApp {
                                 s.fill = fill;
                             }
                         });
+                    }
+                    // Motion path (several objects at once)
+                    let paths = self.layer_paths();
+                    let mut motion: Option<MotionAction> = None;
+                    egui::CollapsingHeader::new("Motion Path").default_open(true).show(ui, |ui| {
+                        if sel.iter().all(|(_, s)| s.is_path) {
+                            ui.label("These objects are motion paths.");
+                            if ui.button("Turn back into objects").clicked() {
+                                motion = Some(MotionAction::ToArt);
+                            }
+                        } else if sel.iter().any(|(_, s)| s.motion.is_some()) {
+                            ui.label("Some objects follow a motion path.");
+                            if ui.button("Detach from path").clicked() {
+                                motion = Some(MotionAction::Detach);
+                            }
+                        } else if paths.is_empty() {
+                            if ui.button("Convert to motion paths").clicked() {
+                                motion = Some(MotionAction::MakePath);
+                            }
+                        } else {
+                            for (i, (pid, pts)) in paths.iter().enumerate() {
+                                if ui.button(format!("Follow path {} ({:.0} points)", i + 1, pts.len())).clicked() {
+                                    motion = Some(MotionAction::Follow(*pid));
+                                }
+                            }
+                        }
+                    });
+                    match motion {
+                        Some(MotionAction::Follow(pid)) => self.follow_path(pid),
+                        Some(MotionAction::Detach) => self.detach_from_path(),
+                        Some(MotionAction::MakePath) => self.make_motion_paths(),
+                        Some(MotionAction::ToArt) => self.paths_to_art(),
+                        None => {}
                     }
                 }
                 ui.separator();
@@ -1471,10 +1779,11 @@ impl FlintApp {
                     }
                 });
                 let before = tw;
-                egui::ComboBox::from_label("Tween").selected_text(format!("{:?}", tw.kind)).show_ui(ui, |ui| {
+                egui::ComboBox::from_label("Tween").selected_text(tw.kind.label()).show_ui(ui, |ui| {
                     ui.selectable_value(&mut tw.kind, TweenKind::None, "None");
                     ui.selectable_value(&mut tw.kind, TweenKind::Classic, "Classic");
                     ui.selectable_value(&mut tw.kind, TweenKind::Shape, "Shape");
+                    ui.selectable_value(&mut tw.kind, TweenKind::Motion, "Motion");
                 });
                 if tw.kind != TweenKind::None {
                     ui.add(egui::Slider::new(&mut tw.ease, -100.0..=100.0).text("Ease"));
@@ -1484,10 +1793,18 @@ impl FlintApp {
                             ui.add(egui::DragValue::new(&mut tw.spins).range(-20..=20).suffix(" × (+CW / −CCW)"));
                         });
                     }
+                    if tw.kind == TweenKind::Motion {
+                        ui.label(egui::RichText::new("The object travels along the motion path it is attached to.").small().weak());
+                    }
                 }
                 if tw != before {
                     if tw.kind != before.kind {
-                        self.tl_set_tween(tw.kind);
+                        if tw.kind == TweenKind::Motion && !self.has_motion_selection() {
+                            self.status = "Attach the object to a motion path first (Motion Path in the properties)".into();
+                            tw.kind = before.kind;
+                        } else {
+                            self.tl_set_tween(tw.kind);
+                        }
                     }
                     self.doc.layers[li].keys.get_mut(&k).unwrap().tween = tw;
                     changed = true;
@@ -1695,6 +2012,14 @@ impl FlintApp {
                             self.tl_set_tween(TweenKind::Shape);
                             ui.close();
                         }
+                        if ui.button("Create Motion Tween").clicked() {
+                            if self.has_motion_selection() {
+                                self.tl_set_tween(TweenKind::Motion);
+                            } else {
+                                self.status = "Attach the object to a motion path first (Properties ▸ Motion Path)".into();
+                            }
+                            ui.close();
+                        }
                         if ui.button("Remove Tween").clicked() {
                             self.tl_set_tween(TweenKind::None);
                             ui.close();
@@ -1730,11 +2055,13 @@ impl FlintApp {
     fn layer_row(&mut self, ui: &mut Ui, li: usize, w: f32, h: f32) {
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
         let active = li == self.layer;
+        let pal = self.theme.palette;
+        let mix = |a: Rgba, b: Rgba, t: f32| crate::theme::c(crate::theme::mix(a, b, t));
         let p = ui.painter().clone();
-        p.rect_filled(rect, 0.0, if active { Color32::from_rgb(38, 90, 160) } else { Color32::from_gray(48) });
-        p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, Color32::from_gray(30)));
+        p.rect_filled(rect, 0.0, if active { self.theme.accent_color() } else { mix(pal.panel, pal.fg, 0.10) });
+        p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, mix(pal.panel, pal.bg, 0.45)));
         let l = { let l = &self.doc.layers[li]; LayerInfo { name: l.name.clone(), visible: l.visible, locked: l.locked, outline: l.outline, color: l.color, kind: l.kind } };
-        p.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, if l.kind == LayerKind::Guide { "🧭" } else { "📄" }, FontId::proportional(12.0), Color32::from_gray(200));
+        p.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, if l.kind == LayerKind::Guide { "🧭" } else { "📄" }, FontId::proportional(12.0), crate::theme::c(pal.fg));
         let name_rect = Rect::from_min_max(rect.min + Vec2::new(26.0, 0.0), Pos2::new(rect.right() - 72.0, rect.bottom()));
         if self.renaming == Some(li) {
             let mut name = l.name.clone();
@@ -1748,14 +2075,14 @@ impl FlintApp {
                 self.renaming = None;
             }
         } else {
-            p.text(name_rect.left_center(), Align2::LEFT_CENTER, &l.name, FontId::proportional(13.0), Color32::WHITE);
+            p.text(name_rect.left_center(), Align2::LEFT_CENTER, &l.name, FontId::proportional(13.0), crate::theme::c(pal.fg));
             if active && !self.sel.is_empty() {
-                p.text(rect.right_center() - Vec2::new(78.0, 0.0), Align2::RIGHT_CENTER, "✏", FontId::proportional(11.0), Color32::from_gray(220));
+                p.text(rect.right_center() - Vec2::new(78.0, 0.0), Align2::RIGHT_CENTER, "✏", FontId::proportional(11.0), crate::theme::c(pal.fg));
             }
         }
         let icon = |x: f32| Rect::from_center_size(Pos2::new(rect.right() - x, rect.center().y), Vec2::splat(18.0));
         let (eye, lock, outl) = (icon(60.0), icon(38.0), icon(16.0));
-        let col = |on: bool| if on { Color32::WHITE } else { Color32::from_gray(110) };
+        let col = |on: bool| if on { crate::theme::c(pal.fg) } else { crate::theme::c(pal.muted) };
         p.text(eye.center(), Align2::CENTER_CENTER, if l.visible { "👁" } else { "✖" }, FontId::proportional(13.0), col(l.visible));
         p.text(lock.center(), Align2::CENTER_CENTER, if l.locked { "🔒" } else { "•" }, FontId::proportional(13.0), col(l.locked));
         let oc = c32(l.color);
@@ -1800,15 +2127,24 @@ impl FlintApp {
     }
 
     fn draw_grid(&self, p: &egui::Painter, rect: Rect, shown: usize, cw: f32, rh: f32, ruler_h: f32) {
-        p.rect_filled(rect, 0.0, Color32::from_gray(34));
+        // Timeline colours follow the theme: `span` is where the layer has
+        // frames, `empty` is beyond it and `ink` reads on top of a span.
+        let pal = self.theme.palette;
+        let mix = |a: Rgba, b: Rgba, t: f32| crate::theme::c(crate::theme::mix(a, b, t));
+        let mixc = |a: Color32, b: Color32, t: f32| a.lerp_to_gamma(b, t);
+        let span = mix(pal.panel, pal.fg, 0.78);
+        let empty = mix(pal.panel, pal.fg, 0.06);
+        let ink = crate::theme::c(pal.bg);
+        let muted = crate::theme::c(pal.muted);
+        p.rect_filled(rect, 0.0, empty);
         // ruler
         let ruler = Rect::from_min_size(rect.min, Vec2::new(rect.width(), ruler_h));
-        p.rect_filled(ruler, 0.0, Color32::from_gray(52));
+        p.rect_filled(ruler, 0.0, mix(pal.panel, pal.fg, 0.12));
         for f in 0..shown {
             let x = rect.left() + f as f32 * cw;
             if (f + 1) % 5 == 0 || f == 0 {
-                p.line_segment([Pos2::new(x + cw * 0.5, ruler.bottom() - 5.0), Pos2::new(x + cw * 0.5, ruler.bottom())], Stroke::new(1.0, Color32::from_gray(150)));
-                p.text(Pos2::new(x + cw * 0.5, ruler.top() + 1.0), Align2::CENTER_TOP, format!("{}", f + 1), FontId::proportional(10.0), Color32::from_gray(190));
+                p.line_segment([Pos2::new(x + cw * 0.5, ruler.bottom() - 5.0), Pos2::new(x + cw * 0.5, ruler.bottom())], Stroke::new(1.0, muted));
+                p.text(Pos2::new(x + cw * 0.5, ruler.top() + 1.0), Align2::CENTER_TOP, format!("{}", f + 1), FontId::proportional(10.0), crate::theme::c(pal.fg));
             }
         }
         let clip = p.clip_rect();
@@ -1818,28 +2154,29 @@ impl FlintApp {
             let y = rect.top() + ruler_h + li as f32 * rh;
             let row = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(rect.width(), rh));
             if li == self.layer {
-                p.rect_filled(row, 0.0, Color32::from_gray(42));
+                p.rect_filled(row, 0.0, mix(pal.panel, pal.fg, 0.10));
             }
             for f in fmin..fmax {
                 let c = Rect::from_min_size(Pos2::new(rect.left() + f as f32 * cw, y), Vec2::new(cw, rh));
                 let in_span = f < l.len;
                 let bg = if in_span {
                     if l.is_guide() {
-                        Color32::from_rgb(120, 170, 165)
+                        mix([120, 170, 165, 255], pal.panel, 0.4)
                     } else {
                         match l.tween_at(f).filter(|(k, end, _)| l.next_key(*k).is_some_and(|n| n < l.len && n == *end)) {
                             Some((_, _, tw)) if tw.kind == TweenKind::Classic => Color32::from_rgb(105, 80, 165),
+                            Some((_, _, tw)) if tw.kind == TweenKind::Motion => Color32::from_rgb(196, 108, 40),
                             Some(_) => Color32::from_rgb(70, 135, 75),
-                            None => Color32::from_gray(205),
+                            None => span,
                         }
                     }
                 } else if (f + 1) % 5 == 0 {
-                    Color32::from_gray(44)
+                    mix(pal.panel, pal.fg, 0.09)
                 } else {
-                    Color32::from_gray(36)
+                    empty
                 };
                 p.rect_filled(c, 0.0, bg);
-                p.line_segment([c.right_top(), c.right_bottom()], Stroke::new(1.0, if in_span { Color32::from_gray(150) } else { Color32::from_gray(28) }));
+                p.line_segment([c.right_top(), c.right_bottom()], Stroke::new(1.0, if in_span { mixc(span, ink, 0.3) } else { mixc(empty, ink, 0.35) }));
             }
             // tween arrows / broken tweens, keyframes, span ends
             for (&k, kf) in &l.keys {
@@ -1852,7 +2189,7 @@ impl FlintApp {
                 if kf.tween.kind != TweenKind::None {
                     let valid = l.next_key(k).is_some_and(|n| n < l.len);
                     if end > k + 1 {
-                        let stroke = Stroke::new(1.0, if valid { Color32::BLACK } else { Color32::from_gray(60) });
+                        let stroke = Stroke::new(1.0, if valid { ink } else { mixc(span, ink, 0.5) });
                         if valid {
                             p.arrow(Pos2::new(cx(k) + 4.0, cy), Vec2::new(cx(end) - cx(k) - 6.0, 0.0), stroke);
                         } else {
@@ -1862,12 +2199,12 @@ impl FlintApp {
                 }
                 let dot = Pos2::new(cx(k), y + rh - 6.0);
                 if kf.shapes.is_empty() {
-                    p.circle(dot, 3.0, Color32::WHITE, Stroke::new(1.0, Color32::BLACK));
+                    p.circle(dot, 3.0, crate::theme::c(pal.bg), Stroke::new(1.0, ink));
                 } else {
-                    p.circle_filled(dot, 3.5, Color32::BLACK);
+                    p.circle_filled(dot, 3.5, ink);
                 }
                 if !kf.script.trim().is_empty() {
-                    p.text(Pos2::new(cx(k), y + 1.0), Align2::CENTER_TOP, "a", FontId::proportional(11.0), Color32::from_rgb(20, 20, 20));
+                    p.text(Pos2::new(cx(k), y + 1.0), Align2::CENTER_TOP, "a", FontId::proportional(11.0), ink);
                 }
                 if kf.sound.is_some() {
                     p.text(Pos2::new(cx(k), y + 1.0), Align2::CENTER_TOP, "♪", FontId::proportional(11.0), Color32::from_rgb(190, 60, 140));
@@ -1877,14 +2214,15 @@ impl FlintApp {
                 }
                 if end > k + 1 && kf.tween.kind == TweenKind::None {
                     let r = Rect::from_center_size(Pos2::new(cx(end - 1), y + rh - 7.0), Vec2::new(5.0, 7.0));
-                    p.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Inside);
+                    p.rect_stroke(r, 0.0, Stroke::new(1.0, ink), StrokeKind::Inside);
                 }
             }
-            p.line_segment([row.left_bottom(), row.right_bottom()], Stroke::new(1.0, Color32::from_gray(25)));
+            p.line_segment([row.left_bottom(), row.right_bottom()], Stroke::new(1.0, mix(pal.panel, pal.bg, 0.45)));
         }
         // selected cell + playhead
         let sel = Rect::from_min_size(Pos2::new(rect.left() + self.frame as f32 * cw, rect.top() + ruler_h + self.layer as f32 * rh), Vec2::new(cw, rh));
-        p.rect_filled(sel, 0.0, Color32::from_rgba_unmultiplied(40, 120, 255, 110));
+        let ac = self.theme.accent_color();
+        p.rect_filled(sel, 0.0, Color32::from_rgba_unmultiplied(ac.r(), ac.g(), ac.b(), 110));
         let px = rect.left() + self.frame as f32 * cw + cw * 0.5;
         let red = Color32::from_rgb(235, 50, 50);
         p.line_segment([Pos2::new(px, rect.top()), Pos2::new(px, rect.bottom())], Stroke::new(1.5, red));
@@ -1895,7 +2233,7 @@ impl FlintApp {
             let a = self.frame.saturating_sub(self.onion_range);
             let b = self.frame + self.onion_range;
             let r = Rect::from_min_max(Pos2::new(rect.left() + a as f32 * cw, ruler.bottom() - 4.0), Pos2::new(rect.left() + (b + 1) as f32 * cw, ruler.bottom()));
-            p.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(120, 170, 255, 140));
+            p.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(ac.r(), ac.g(), ac.b(), 140));
         }
     }
 
@@ -1933,7 +2271,7 @@ impl FlintApp {
 
         // ---- draw
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, Color32::from_gray(70));
+        painter.rect_filled(rect, 0.0, crate::theme::c(self.theme.palette.stage));
         let stage_rect = Rect::from_min_size(origin, stage_px);
         let in_symbol = !self.doc.edit_stack.is_empty();
         if in_symbol {
@@ -1980,6 +2318,11 @@ impl FlintApp {
             let outline = l.outline.then(|| c32(l.color));
             // Guide layers are translucent reference art in the editor.
             let alpha = if l.is_guide() { 0.55 } else { 1.0 };
+            if s.is_path {
+                // motion paths are guides: a dashed line, never artwork
+                draw_path_guide(&shape_painter, &v, &s, self.theme.accent_color());
+                continue;
+            }
             render::draw_shape(&shape_painter, &v, &s, &render::Style { alpha, outline });
         }
 
@@ -1991,7 +2334,7 @@ impl FlintApp {
             painter.circle_stroke(o, 3.0, k);
         }
         // selection decorations
-        let accent = Color32::from_rgb(40, 140, 255);
+        let accent = self.theme.accent_color();
         if !self.playing {
             for (li, s) in self.sel_shapes() {
                 let b = s.bounds();
@@ -2002,13 +2345,13 @@ impl FlintApp {
             if self.tool == Tool::Transform {
                 if let Some(b) = self.sel_bounds() {
                     let r = Rect::from_min_max(v.to_screen([b[0], b[1]]), v.to_screen([b[2], b[3]]));
-                    painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Middle);
+                    painter.rect_stroke(r, 0.0, Stroke::new(1.0, crate::theme::c(self.theme.palette.fg)), StrokeKind::Middle);
                     for h in handles(r) {
                         let hr = Rect::from_center_size(h, Vec2::splat(7.0));
-                        painter.rect_filled(hr, 0.0, Color32::WHITE);
-                        painter.rect_stroke(hr, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Inside);
+                        painter.rect_filled(hr, 0.0, crate::theme::c(self.theme.palette.fg));
+                        painter.rect_stroke(hr, 0.0, Stroke::new(1.0, crate::theme::c(self.theme.palette.bg)), StrokeKind::Inside);
                     }
-                    painter.circle(r.center(), 4.0, Color32::WHITE, Stroke::new(1.0, Color32::BLACK));
+                    painter.circle(r.center(), 4.0, crate::theme::c(self.theme.palette.fg), Stroke::new(1.0, crate::theme::c(self.theme.palette.bg)));
                 }
             }
         }
@@ -2078,14 +2421,14 @@ impl FlintApp {
             }
             Drag::Marquee(a, b) => {
                 let r = Rect::from_two_pos(v.to_screen(*a), v.to_screen(*b));
-                painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(40, 140, 255, 30));
+                painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 30));
                 render::dashed_rect(&painter, r, accent);
             }
             _ => {}
         }
         if self.tool == Tool::Eraser && !space {
             if let Some(h) = hover {
-                painter.circle_stroke(h, self.eraser_size * 0.5 * self.zoom, Stroke::new(1.0, Color32::from_gray(20)));
+                painter.circle_stroke(h, self.eraser_size * 0.5 * self.zoom, Stroke::new(1.0, crate::theme::c(self.theme.palette.fg)));
             }
         }
 
@@ -2094,7 +2437,7 @@ impl FlintApp {
         // status overlay: stage coords
         if let Some(h) = hover {
             let sp = v.to_stage(h);
-            painter.text(rect.left_bottom() + Vec2::new(8.0, -6.0), Align2::LEFT_BOTTOM, format!("x {:.0}  y {:.0}   {:.0}%", sp[0], sp[1], self.zoom * 100.0), FontId::monospace(11.0), Color32::from_gray(220));
+            painter.text(rect.left_bottom() + Vec2::new(8.0, -6.0), Align2::LEFT_BOTTOM, format!("x {:.0}  y {:.0}   {:.0}%", sp[0], sp[1], self.zoom * 100.0), FontId::monospace(11.0), crate::theme::c(self.theme.palette.fg));
         }
     }
 
@@ -2563,11 +2906,13 @@ impl FlintApp {
         });
         self.new_dialog = if open && !create { Some((w, h, fps)) } else { None };
         if create {
-            let (tool, sc, fc) = (self.tool, self.stroke_col, self.fill_col);
+            let (tool, sc, fc, theme, shot) = (self.tool, self.stroke_col, self.fill_col, self.theme.clone(), self.screenshot.clone());
             *self = Self::blank(Document::new(w, h, fps));
             self.tool = tool;
             self.stroke_col = sc;
             self.fill_col = fc;
+            self.theme = theme;
+            self.screenshot = shot;
         }
     }
 }
@@ -2650,6 +2995,12 @@ fn color_opt(ui: &mut Ui, label: &str, c: &mut Option<Rgba>) -> bool {
 }
 
 impl eframe::App for FlintApp {
+    fn on_exit(&mut self) {
+        if self.theme_dirty {
+            self.save_theme();
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         if let Some(intro) = &mut self.intro {
             let mut done = false;
@@ -2730,12 +3081,32 @@ impl eframe::App for FlintApp {
                 self.properties_panel(ui);
             }
         });
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.stage(ui));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::c(self.theme.palette.panel))).show(ui, |ui| self.stage(ui));
         self.new_doc_dialog(&ctx);
         self.symbol_dialog_window(&ctx);
         self.actions_window(&ctx);
+        self.theme_window(&ctx);
         self.publish_window(&ctx);
         crate::about::window(&ctx, &mut self.show_about, "Flint");
+        self.take_screenshot(&ctx);
+    }
+}
+
+/// Saving a picture of the editor window (`--screenshot <file.png>`).
+impl FlintApp {
+    fn take_screenshot(&mut self, ctx: &egui::Context) {
+        if self.screenshot_done {
+            return;
+        }
+        let Some(path) = self.screenshot.clone() else { return };
+        self.screenshot_done = true;
+        ctx.request_screenshot(move |img| {
+            match save_png(&img, &path) {
+                Ok(()) => println!("screenshot saved: {}", path.display()),
+                Err(e) => eprintln!("screenshot failed: {e}"),
+            }
+            std::process::exit(0);
+        });
     }
 }
 
@@ -2743,6 +3114,31 @@ impl eframe::App for FlintApp {
 fn snap_to(p: P, g: f32) -> P {
     let g = g.max(1.0);
     [(p[0] / g).round() * g, (p[1] / g).round() * g]
+}
+
+/// Draws a motion path as a dashed guide line with a start marker.
+fn draw_path_guide(p: &egui::Painter, v: &View, s: &Shape, col: Color32) {
+    let Some(pts) = path_world_points(s) else { return };
+    if pts.len() < 2 {
+        return;
+    }
+    // the object follows the smoothed curve, so show that
+    let curve = smooth_path(&pts);
+    let sp: Vec<Pos2> = curve.iter().map(|q| v.to_screen(*q)).collect();
+    p.extend(egui::Shape::dashed_line(&sp, Stroke::new(1.5, col), 7.0, 5.0));
+    p.circle_filled(sp[0], 3.5, col);
+    p.circle_stroke(sp[0], 3.5, Stroke::new(1.0, col));
+}
+
+/// Writes an egui image to a PNG file.
+fn save_png(img: &egui::ColorImage, path: &std::path::Path) -> Result<(), String> {
+    let [w, h] = img.size;
+    let mut pix = tiny_skia::Pixmap::new(w as u32, h as u32).ok_or("bad image size")?;
+    for (i, p) in img.pixels.iter().enumerate() {
+        let [r, g, b, a] = p.to_array();
+        pix.pixels_mut()[i] = tiny_skia::PremultipliedColorU8::from_rgba(r, g, b, a).unwrap_or_else(|| tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap());
+    }
+    std::fs::write(path, pix.encode_png().map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2753,6 +3149,14 @@ pub enum ActTarget {
     EveryFrame,
     Key,
     Functions,
+}
+
+/// What the properties panel asked the timeline to do with a motion path.
+enum MotionAction {
+    Follow(u64),
+    Detach,
+    MakePath,
+    ToArt,
 }
 
 impl FlintApp {
@@ -2901,6 +3305,97 @@ impl FlintApp {
             self.script_active = false;
         }
         self.show_actions = open;
+    }
+
+    /// The theme editor: presets, light/dark, the accent colour and every
+    /// palette colour. Changes apply live and are saved for the next start.
+    fn theme_window(&mut self, ctx: &egui::Context) {
+        if !self.show_theme {
+            return;
+        }
+        let mut open = true;
+        let mut changed = false;
+        let mut pal = self.theme.palette;
+        egui::Window::new("Theme").open(&mut open).default_size([340.0, 380.0]).resizable(true).show(ctx, |ui| {
+            egui::Grid::new("themeg").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                ui.label("Theme");
+                egui::ComboBox::from_id_salt("themepreset").selected_text(self.theme.name.clone()).show_ui(ui, |ui| {
+                    for p in crate::theme::PRESETS {
+                        if ui.selectable_label(self.theme.name == p.name, p.name).clicked() {
+                            self.theme.apply_preset(p.name);
+                            changed = true;
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label("Mode");
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(self.theme.dark, "Dark").clicked() {
+                        self.theme.set_dark(true);
+                        changed = true;
+                    }
+                    if ui.selectable_label(!self.theme.dark, "Light").clicked() {
+                        self.theme.set_dark(false);
+                        changed = true;
+                    }
+                });
+                ui.end_row();
+                ui.label("Accent");
+                let mut acc = self.theme.accent_color();
+                if egui::color_picker::color_edit_button_srgba(ui, &mut acc, egui::color_picker::Alpha::Opaque).changed() {
+                    self.theme.accent = Some(rgba(acc));
+                    changed = true;
+                }
+                ui.end_row();
+            });
+            ui.separator();
+            egui::CollapsingHeader::new("Colours").default_open(true).show(ui, |ui| {
+                egui::Grid::new("palgrid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                    let pick = |ui: &mut Ui, label: &str, v: &mut Rgba| {
+                        ui.label(label);
+                        let mut c = crate::theme::c(*v);
+                        let ch = egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed();
+                        if ch {
+                            *v = rgba(c);
+                        }
+                        ui.end_row();
+                        ch
+                    };
+                    changed |= pick(ui, "Panels", &mut pal.panel);
+                    changed |= pick(ui, "Windows", &mut pal.window);
+                    changed |= pick(ui, "Background", &mut pal.bg);
+                    changed |= pick(ui, "Text", &mut pal.fg);
+                    changed |= pick(ui, "Muted text", &mut pal.muted);
+                    changed |= pick(ui, "Stage", &mut pal.stage);
+                });
+                if ui.button("Reset colours to the preset").clicked() {
+                    let name = self.theme.name.clone();
+                    self.theme.apply_preset(&name);
+                    pal = self.theme.palette;
+                    changed = true;
+                }
+            });
+            ui.separator();
+            ui.label(egui::RichText::new("Colours are the editor's. Artwork colours belong to the document.").small().weak());
+        });
+        if changed {
+            self.theme.palette = pal;
+            ctx.set_visuals(self.theme.visuals());
+            self.theme_dirty = true;
+        }
+        // the file is written when the window closes, not on every colour drag
+        if !open && self.theme_dirty {
+            self.save_theme();
+        }
+        self.show_theme = open;
+    }
+
+    /// Writes the theme to disk.
+    pub fn save_theme(&mut self) {
+        self.theme_dirty = false;
+        if let Err(e) = self.theme.save() {
+            self.status = format!("Theme not saved: {e}");
+        }
     }
 }
 

@@ -92,6 +92,29 @@ pub enum TweenKind {
     None,
     Classic,
     Shape,
+    /// The object travels along a motion path (see [`Motion`]).
+    Motion,
+}
+
+impl TweenKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            TweenKind::None => "None",
+            TweenKind::Classic => "Classic",
+            TweenKind::Shape => "Shape",
+            TweenKind::Motion => "Motion",
+        }
+    }
+}
+
+/// A motion-path attachment: the object travels along a path shape.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Motion {
+    /// Id of the path shape this object follows (in the same layer).
+    pub path: u64,
+    /// Rotate the object so it points along the path.
+    #[serde(default)]
+    pub orient: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -313,6 +336,12 @@ pub struct Shape {
     /// Script run when this object is clicked in the player.
     #[serde(default)]
     pub on_click: String,
+    /// Motion path this object follows (a path shape in the same layer).
+    #[serde(default)]
+    pub motion: Option<Motion>,
+    /// This shape is a motion path: a guide in the editor, never drawn.
+    #[serde(default)]
+    pub is_path: bool,
 }
 
 impl Default for Shape {
@@ -326,6 +355,8 @@ impl Default for Shape {
             fill: None,
             name: String::new(),
             on_click: String::new(),
+            motion: None,
+            is_path: false,
         }
     }
 }
@@ -672,7 +703,20 @@ impl Layer {
         }
         let k = self.key_at(f);
         let kf = &self.keys[&k];
-        if f == k || kf.tween.kind == TweenKind::None {
+        if f == k {
+            // a motion tween that ends on this frame still moves its object
+            // to the end of the path
+            if let Some(pk) = self.keys.range(..f).next_back().map(|(k, _)| *k) {
+                if let Some(pkf) = self.keys.get(&pk) {
+                    if pkf.tween.kind == TweenKind::Motion && self.span_end(pk) == f {
+                        let spin = pkf.tween.spins as f32 * TAU;
+                        return self.motion_shapes(pkf, &kf.shapes, 1.0, spin);
+                    }
+                }
+            }
+            return kf.shapes.clone();
+        }
+        if kf.tween.kind == TweenKind::None {
             return kf.shapes.clone();
         }
         let Some(k2) = self.next_key(k).filter(|k2| *k2 < self.len) else {
@@ -710,8 +754,134 @@ impl Layer {
                 out
             }
             TweenKind::None => unreachable!(),
+            TweenKind::Motion => self.motion_shapes(kf, b, t, spin),
         }
     }
+
+    /// A motion tween: the attached object travels along its path, everything
+    /// else tweens as usual.
+    fn motion_shapes(&self, kf: &Keyframe, b: &[Shape], t: f32, spin: f32) -> Vec<Shape> {
+        let mut out = Vec::with_capacity(kf.shapes.len());
+        for a in &kf.shapes {
+            let path = a
+                .motion
+                .as_ref()
+                .and_then(|m| kf.shapes.iter().chain(b.iter()).find(|p| p.id == m.path))
+                .and_then(path_world_points);
+            let Some(pts) = path else {
+                // not attached to a path: tween like a classic tween
+                out.push(match b.iter().find(|s| s.id == a.id) {
+                    Some(bs) => lerp_shape(a, bs, t, spin, false),
+                    None => a.clone(),
+                });
+                continue;
+            };
+            let mut s = a.clone();
+            let (pos, ang) = sample_path(&pts, t);
+            // the object keeps its offset from the start of the path
+            let off = [a.xf.x - pts[0][0], a.xf.y - pts[0][1]];
+            s.xf.x = pos[0] + off[0];
+            s.xf.y = pos[1] + off[1];
+            if let Some(bs) = b.iter().find(|s| s.id == a.id) {
+                s.xf.sx = lerp(a.xf.sx, bs.xf.sx, t);
+                s.xf.sy = lerp(a.xf.sy, bs.xf.sy, t);
+                let rot = if a.motion.map(|m| m.orient).unwrap_or(false) {
+                    // point along the path, keeping the start orientation
+                    let (_, a0) = sample_path(&pts, 0.0);
+                    ang + (a.xf.rot - a0)
+                } else {
+                    lerp_angle(a.xf.rot, bs.xf.rot, t)
+                };
+                s.xf.rot = rot + spin;
+                s.stroke = lerp_col(a.stroke, bs.stroke, t);
+                s.fill = lerp_col(a.fill, bs.fill, t);
+                s.stroke_w = lerp(a.stroke_w, bs.stroke_w, t);
+            }
+            out.push(s);
+        }
+        out
+    }
+}
+
+/// The world-space points of a motion-path shape.
+pub fn path_world_points(s: &Shape) -> Option<Vec<P>> {
+    let Geom::Path { pts, closed } = &s.geom else { return None };
+    if pts.len() < 2 {
+        return None;
+    }
+    let mut out: Vec<P> = pts.iter().map(|p| s.xf.apply(*p)).collect();
+    if *closed {
+        // a closed path travels all the way round and ends where it started
+        if let Some(first) = out.first().copied() {
+            out.push(first);
+        }
+    }
+    Some(out)
+}
+
+/// Samples a path at `t` (0..1) by arc length: the point and the tangent angle.
+pub fn sample_path(pts: &[P], t: f32) -> (P, f32) {
+    if pts.len() < 2 {
+        return (pts.first().copied().unwrap_or([0.0, 0.0]), 0.0);
+    }
+    let curve = smooth_path(pts);
+    let mut lens = Vec::with_capacity(curve.len());
+    let mut total = 0.0;
+    for i in 1..curve.len() {
+        let d = dist(curve[i - 1], curve[i]);
+        lens.push(d);
+        total += d;
+    }
+    if total <= 0.0 {
+        return (curve[0], 0.0);
+    }
+    let target = t.clamp(0.0, 1.0) * total;
+    let mut acc = 0.0;
+    for (i, l) in lens.iter().enumerate() {
+        if acc + l >= target || i == lens.len() - 1 {
+            let f = if *l > 0.0 { ((target - acc) / l).clamp(0.0, 1.0) } else { 0.0 };
+            let a = curve[i];
+            let b = curve[i + 1];
+            return ([lerp(a[0], b[0], f), lerp(a[1], b[1], f)], (b[1] - a[1]).atan2(b[0] - a[0]));
+        }
+        acc += l;
+    }
+    (curve[curve.len() - 1], 0.0)
+}
+
+/// A Catmull-Rom smoothing of the path, so drawn points become a smooth curve.
+pub fn smooth_path(pts: &[P]) -> Vec<P> {
+    let n = pts.len();
+    if n < 3 {
+        return pts.to_vec();
+    }
+    let at = |i: isize| pts[i.clamp(0, n as isize - 1) as usize];
+    let mut out = Vec::with_capacity((n - 1) * 8 + 1);
+    for i in 0..n - 1 {
+        let (p0, p1, p2, p3) = (at(i as isize - 1), at(i as isize), at(i as isize + 1), at(i as isize + 2));
+        for k in 0..8 {
+            out.push(catmull(p0, p1, p2, p3, k as f32 / 8.0));
+        }
+    }
+    out.push(pts[n - 1]);
+    out
+}
+
+fn catmull(p0: P, p1: P, p2: P, p3: P, t: f32) -> P {
+    let (t2, t3) = (t * t, t * t * t);
+    let mut out = [0.0; 2];
+    for i in 0..2 {
+        out[i] = 0.5
+            * (2.0 * p1[i]
+                + (-p0[i] + p2[i]) * t
+                + (2.0 * p0[i] - 5.0 * p1[i] + 4.0 * p2[i] - p3[i]) * t2
+                + (-p0[i] + 3.0 * p1[i] - 3.0 * p2[i] + p3[i]) * t3);
+    }
+    out
+}
+
+fn dist(a: P, b: P) -> f32 {
+    ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()
 }
 
 fn fade(s: &mut Shape, a: f32) {
@@ -904,6 +1074,10 @@ impl Document {
                 continue;
             }
             for s in self.eval_layer(l, f, 0, timing, include_guides) {
+                // motion paths are guides: they never reach the player or an export
+                if !include_guides && s.is_path {
+                    continue;
+                }
                 out.push((li, s));
             }
         }

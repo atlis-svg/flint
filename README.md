@@ -26,10 +26,13 @@ Draw, animate on a timeline, script with a built-in language, publish to a singl
 - Animate-style layout: tools, stage + pasteboard, layered timeline, properties, library
 - Vector tools: Selection, Free Transform, Pencil, Brush, Line, Rectangle (rounded), Oval, Paint Bucket, Ink Bottle, Eyedropper, Eraser (splits strokes), Text, Hand, Zoom — with Animate's shortcut keys
 - Timeline: layers (show / lock / outline, **Normal or Guide** — guide layers are translucent reference art in the editor and hidden in the player and exports), frames, keyframes, blank keyframes (F5 / F6 / F7), frame labels, onion skinning, scrubbing
-- **Classic tweens** (position, scale, rotation, color, easing, spins) and **shape tweens** (morphing)
+- **Classic tweens** (position, scale, rotation, color, easing, spins), **shape tweens** (morphing) and **motion tweens** (travel along a drawn path)
+- **Themes**: 10 named looks (Midnight, Graphite, Solarized Dark & Light, Paper, Nord, Dracula, Rose Pine, Amber, High Contrast), a light/dark switch, a custom accent colour and per-colour editing — **View ▸ Theme…**
 - **Symbols** with their own timelines (F8 / Ctrl+F8 opens an Animate-style **New Symbol panel**: name + **Movie Clip / Graphic / Button** type + Loop / Play Once / Single Frame), a Library, edit-in-isolation, nested symbols. **Graphic** symbols sync to the parent timeline; **Button** symbols have fixed **Up / Over / Down / Hit** frames (Hit defines the click area and is never drawn)
 - Groups (Ctrl+G), Distribute to Layers, align, arrange, flip, grid & snapping, undo/redo, copy/paste
 - Export: PNG, PNG sequence, animated GIF, SVG
+
+**Motion paths** — draw a stroke with the Pencil, select it and press **Convert to Motion Path** (Properties ▸ Motion Path, or Modify ▸ Motion Path). The stroke becomes a dashed guide that is never drawn in the player or in exports. Now select the object that should travel, pick **Follow Path**, and the span turns into a motion tween: the object rides the smoothed curve at a steady speed, keeping its distance from the path's start, and **Orient to path** turns it along the curve.
 
 **Scripting** — [Rhai](https://rhai.rs), ActionScript-style
 ```rust
@@ -67,6 +70,7 @@ cargo build --release
 ./target/release/flint examples/platformer.flint
 ./target/release/flint-player                 # player / Flint Hub browser
 ./target/release/flint-player examples/demo.flx
+./target/release/flint --screenshot shot.png   # save a picture of the editor
 ```
 
 On Linux you need the usual windowing libraries (X11/Wayland, `libxkbcommon`) and, for file dialogs, an XDG desktop portal.
@@ -89,6 +93,7 @@ On Linux you need the usual windowing libraries (X11/Wayland, `libxkbcommon`) an
 |---|---|
 | `src/model.rs` | Document model: layers, keyframes, tweens, symbols |
 | `src/app.rs` | The editor UI (egui) |
+| `src/theme.rs` | Editor themes: palettes, accents, presets |
 | `src/runtime.rs` | Movie runtime + Rhai scripting API |
 | `src/render.rs`, `src/export.rs` | On-screen drawing; PNG / GIF / SVG export (tiny-skia) |
 | `src/flx.rs` | `.flx` movie format and projectors |

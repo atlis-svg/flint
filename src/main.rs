@@ -85,6 +85,9 @@ fn selftest(dir: &std::path::Path) -> Result<(), String> {
     symbol_selftest(dir)?;
     guide_symbol_selftest(dir)?;
     fill_selftest()?;
+    motion_selftest(dir)?;
+    motion_ui_selftest()?;
+    theme_selftest()?;
     intro_selftest()?;
     scripted_selftest(dir)?;
     println!("selftest ok: {} frames, outputs in {}", doc.frame_count(), dir.display());
@@ -106,6 +109,7 @@ pub fn demo_movie() -> model::Document {
         stroke_w: 2.0,
         fill: Some(fill),
         on_click: on_click.into(),
+        ..Default::default()
     };
     let hero = sh(&mut doc, "hero", Geom::Ellipse { rx: 22.0, ry: 22.0 }, 320.0, 200.0, [255, 90, 90, 255], "");
     let goal = sh(&mut doc, "goal", Geom::Rect { w: 40.0, h: 40.0, radius: 6.0 }, 560.0, 90.0, [90, 220, 120, 255], "");
@@ -555,6 +559,143 @@ fn showcase() -> model::Document {
     layers.reverse();
     doc.layers = layers;
     doc
+}
+
+/// The editor's own motion path actions: turn a stroke into a path, attach an
+/// object to it and detach it again.
+fn motion_ui_selftest() -> Result<(), String> {
+    use flint::app::FlintApp;
+    use model::*;
+    let mut doc = Document::new(320.0, 200.0, 12.0);
+    let path_id = doc.alloc_id();
+    let ball_id = doc.alloc_id();
+    doc.layers[0].len = 12;
+    let l = &mut doc.layers[0];
+    l.keys.get_mut(&0).unwrap().shapes.push(Shape {
+        id: path_id,
+        geom: Geom::Path { pts: vec![[-100.0, 0.0], [0.0, -60.0], [100.0, 0.0]], closed: false },
+        xf: Xform::at(160.0, 100.0),
+        stroke: Some([0, 0, 0, 255]),
+        ..Default::default()
+    });
+    l.keys.get_mut(&0).unwrap().shapes.push(Shape {
+        id: ball_id,
+        geom: Geom::Ellipse { rx: 10.0, ry: 10.0 },
+        xf: Xform::at(60.0, 100.0),
+        fill: Some([255, 60, 60, 255]),
+        ..Default::default()
+    });
+    let mut app = FlintApp::with_document(doc);
+    app.set_frame_at(0);
+    app.set_layer(0);
+    // the drawn stroke becomes a motion path
+    app.select_ids(0, &[path_id]);
+    app.make_motion_paths();
+    let path = app.doc().layers[0].keys[&0].shapes.iter().find(|s| s.id == path_id).unwrap();
+    assert!(path.is_path, "the stroke became a motion path");
+    assert!(path.stroke.is_none(), "a motion path is not drawn");
+    // the object follows it
+    app.select_ids(0, &[ball_id]);
+    app.follow_path(path_id);
+    let l = &app.doc().layers[0];
+    assert_eq!(l.keys[&0].tween.kind, TweenKind::Motion, "a motion tween was created");
+    assert_eq!(l.keys[&0].shapes.iter().find(|s| s.id == ball_id).unwrap().motion, Some(Motion { path: path_id, orient: false }));
+    let mid = l.shapes_at(5).iter().find(|s| s.id == ball_id).unwrap().clone();
+    assert!(mid.xf.y < 95.0, "the ball follows the curve: y = {}", mid.xf.y);
+    // and can be let go again
+    app.select_ids(0, &[ball_id]);
+    app.detach_from_path();
+    assert!(app.doc().layers[0].keys[&0].shapes.iter().find(|s| s.id == ball_id).unwrap().motion.is_none(), "the ball was detached");
+    Ok(())
+}
+
+/// A motion tween: the ball travels along the drawn path.
+fn motion_selftest(dir: &std::path::Path) -> Result<(), String> {
+    use model::*;
+    let mut doc = Document::new(320.0, 200.0, 12.0);
+    let path_id = doc.alloc_id();
+    let ball_id = doc.alloc_id();
+    // a curve from (40,150) up and over to (280,150)
+    let world: Vec<P> = vec![[40.0, 150.0], [120.0, 60.0], [200.0, 60.0], [280.0, 150.0]];
+    let l = &mut doc.layers[0];
+    l.keys.get_mut(&0).unwrap().shapes.push(Shape {
+        id: path_id,
+        geom: Geom::Path { pts: world.iter().map(|p| [p[0] - 160.0, p[1] - 100.0]).collect(), closed: false },
+        xf: Xform::at(160.0, 100.0),
+        is_path: true,
+        ..Default::default()
+    });
+    l.keys.get_mut(&0).unwrap().shapes.push(Shape {
+        id: ball_id,
+        geom: Geom::Ellipse { rx: 12.0, ry: 12.0 },
+        xf: Xform::at(40.0, 150.0),
+        fill: Some([255, 80, 80, 255]),
+        motion: Some(Motion { path: path_id, orient: false }),
+        ..Default::default()
+    });
+    l.keys.get_mut(&0).unwrap().tween.kind = TweenKind::Motion;
+    insert_keyframe(l, 11, false);
+    // the ball starts on the path and ends where the path ends
+    let start = doc.layers[0].shapes_at(0).iter().find(|s| s.id == ball_id).unwrap().clone();
+    assert!((start.xf.x - 40.0).abs() < 0.01 && (start.xf.y - 150.0).abs() < 0.01, "the ball starts at the path's start");
+    // half way along the path the ball is above the straight line
+    let mid = doc.layers[0].shapes_at(5).iter().find(|s| s.id == ball_id).unwrap().clone();
+    assert!(mid.xf.y < 140.0, "the ball follows the curve: y = {}", mid.xf.y);
+    assert!(mid.xf.x > 60.0 && mid.xf.x < 260.0, "the ball moves along the path: x = {}", mid.xf.x);
+    // the last frame of the tween sits at the end of the path
+    let end = doc.layers[0].shapes_at(11).iter().find(|s| s.id == ball_id).unwrap().clone();
+    assert!((end.xf.x - 280.0).abs() < 0.5 && (end.xf.y - 150.0).abs() < 0.5, "the ball ends at the path's end: {:?} {:?}", end.xf.x, end.xf.y);
+    // the path itself is a guide: it never reaches the player or an export
+    assert!(doc.output_list(0).iter().all(|(_, s)| s.id != path_id), "motion paths are not drawn");
+    assert!(doc.render_list(0).iter().any(|(_, s)| s.id == path_id), "motion paths show in the editor");
+    // orient to path turns the object along the curve
+    doc.layers[0].keys.get_mut(&0).unwrap().shapes.iter_mut().find(|s| s.id == ball_id).unwrap().motion = Some(Motion { path: path_id, orient: true });
+    let turned = doc.layers[0].shapes_at(3).iter().find(|s| s.id == ball_id).unwrap().clone();
+    assert!(turned.xf.rot.abs() > 0.01, "the object turns along the path: {}", turned.xf.rot);
+    // round trip through the file format
+    let json = serde_json::to_string(&doc).map_err(|e| e.to_string())?;
+    let back: Document = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let b = back.layers[0].shapes_at(5).iter().find(|s| s.id == ball_id).unwrap().clone();
+    assert!((b.xf.y - mid.xf.y).abs() < 0.01, "the motion path survives a save");
+    std::fs::write(dir.join("selftest_motion.flint"), json).map_err(|e| e.to_string())?;
+    export::export_gif(&doc, &dir.join("selftest_motion.gif"))?;
+    Ok(())
+}
+
+/// The theme editor: presets, modes, accents and saving.
+fn theme_selftest() -> Result<(), String> {
+    use flint::theme::*;
+    assert!(PRESETS.len() >= 8, "a few themes ship with Flint");
+    let mut t = Theme::default();
+    assert_eq!(t.name, "Midnight");
+    // every preset has a light and a dark variant, and they differ
+    for p in PRESETS {
+        assert_ne!(p.dark.panel, p.light.panel, "{} has two variants", p.name);
+        assert!(t.apply_preset(p.name), "{} applies", p.name);
+        assert_eq!(t.name, p.name);
+        assert_eq!(t.dark, p.default_dark, "{} starts in its own mode", p.name);
+        t.set_dark(false);
+        assert_eq!(t.palette.panel, p.light.panel, "{} light palette", p.name);
+        t.set_dark(true);
+        assert_eq!(t.palette.panel, p.dark.panel, "{} dark palette", p.name);
+        // the visuals follow the palette
+        let v = t.visuals();
+        assert_eq!(v.panel_fill, c(p.dark.panel));
+        assert!(v.dark_mode);
+    }
+    // the accent colour is used for the selection
+    t.accent = Some([10, 20, 30, 255]);
+    assert_eq!(t.accent(), [10, 20, 30, 255]);
+    assert_eq!(t.visuals().selection.bg_fill, c([10, 20, 30, 255]));
+    // themes survive a save and load
+    let dir = std::env::temp_dir().join(format!("flint-theme-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = dir.join("theme.json");
+    std::fs::write(&file, serde_json::to_vec_pretty(&t).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let back: Theme = serde_json::from_slice(&std::fs::read(&file).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    assert_eq!(back, t, "the theme survives a save");
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
 }
 
 fn fill_selftest() -> Result<(), String> {

@@ -9,3 +9,4 @@ pub mod hub;
 pub mod about;
 pub mod fill;
 pub mod intro;
+pub mod theme;
